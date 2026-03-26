@@ -23,7 +23,7 @@
 
 ### Key fields
 - `grossProfitPct`: Raw profit before gas costs. Shows the DEX spread.
-- `netProfitPct`: Profit after estimated gas (0.5 STX). The number that matters.
+- `netProfitPct`: Profit after estimated gas (0.05 STX). The number that matters.
 - `direction`: Tells you which DEX to buy on first and which to sell on.
 - `buyDex` / `sellDex`: The DEX names for the two legs of the trade.
 

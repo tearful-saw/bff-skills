@@ -167,7 +167,8 @@ class ArbScanner {
       try {
         const targets = await this.bitflow.getAllPossibleTokenY(tokenId);
         if (!targets?.includes(stxId)) continue;
-      } catch {
+      } catch (e: any) {
+        log(`  Bitflow route check failed for ${tokenId}: ${e.message}`);
         continue;
       }
 
@@ -177,7 +178,8 @@ class ArbScanner {
       try {
         const route = await this.alex.getRouter(mapToken.alexCurrency as Currency, mapSTX.alexCurrency as Currency);
         if (!route || route.length === 0) continue;
-      } catch {
+      } catch (e: any) {
+        log(`  Alex route check failed for ${mapToken.symbol}: ${e.message}`);
         continue;
       }
 
@@ -193,7 +195,8 @@ class ArbScanner {
     try {
       const quote = await this.bitflow.getQuoteForRoute(tokenX, tokenY, amountHuman);
       return quote?.bestRoute?.quote ?? null;
-    } catch {
+    } catch (e: any) {
+      log(`  Bitflow quote ${tokenX}->${tokenY} failed: ${e.message}`);
       return null;
     }
   }
@@ -201,7 +204,8 @@ class ArbScanner {
   async getAlexQuote(currencyX: string, amountBase: bigint, currencyY: string): Promise<bigint | null> {
     try {
       return await this.alex.getAmountTo(currencyX as Currency, amountBase, currencyY as Currency);
-    } catch {
+    } catch (e: any) {
+      log(`  Alex quote ${currencyX}->${currencyY} failed: ${e.message}`);
       return null;
     }
   }
@@ -332,7 +336,9 @@ class ArbScanner {
         try {
           const result = await this.scanPair(a, b, amt);
           if (result) pairResults.push(result);
-        } catch {}
+        } catch (e: any) {
+          log(`  Scan error for ${tokenMap.symbol} at ${amt} STX: ${e.message}`);
+        }
         await new Promise(r => setTimeout(r, 100));
       }
 

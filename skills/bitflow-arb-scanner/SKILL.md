@@ -21,7 +21,7 @@ Autonomous trading agents need to know *where* prices diverge before executing. 
 ## Safety notes
 - **Read-only**: This skill never submits transactions, never moves funds, never accesses wallet keys.
 - No API keys required — uses public endpoints on both DEXes.
-- Rate-limited to respect both APIs (200ms delay between pair scans).
+- Rate-limited to respect both APIs (100ms delay between pair scans).
 - All quotes are point-in-time snapshots; prices may move before execution.
 
 ## Commands
@@ -76,6 +76,6 @@ All outputs are JSON to stdout.
 ## Known constraints
 - Mainnet only (both Bitflow and Alex are mainnet-only)
 - Quotes are snapshots — price slippage between scan and execution is not accounted for
-- Gas estimate is conservative (0.5 STX for 2 transactions)
+- Gas estimate is conservative (0.05 STX for 2 transactions)
 - Does not detect MEV or front-running risk
 - Public API rate limits: Bitflow 500 req/min, Alex standard limits
