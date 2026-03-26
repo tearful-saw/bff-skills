@@ -27,12 +27,6 @@ const GAS_BUFFER_STX = 0.05; // conservative 2-tx gas estimate
 const MIN_PROFIT_PCT = 0.1; // report opportunities above this
 const SCAN_AMOUNTS_STX = [1, 10, 50, 100]; // multi-size scan
 
-// Known token mappings (Bitflow tokenId -> Alex Currency)
-// Fallback if dynamic discovery fails
-const KNOWN_MAPPINGS: Record<string, { alexCurrency: string; symbol: string; decimals: number }> = {
-  "token-stx": { alexCurrency: Currency.STX, symbol: "STX", decimals: 6 },
-};
-
 // ─── Helpers ──────────────────────────────────────────────────────────────
 function output(status: string, action: string, data: any, error: any = null) {
   console.log(JSON.stringify({ status, action, data, error }));
@@ -43,7 +37,17 @@ function log(...args: any[]) {
 }
 
 function toBaseUnits(human: number, decimals: number): bigint {
-  return BigInt(Math.round(human * 10 ** decimals));
+  // String-based conversion to avoid floating-point precision loss
+  const [whole, frac = ""] = human.toString().split(".");
+  const padded = (frac + "0".repeat(decimals)).slice(0, decimals);
+  return BigInt(whole + padded);
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label}: timeout after ${ms}ms`)), ms)),
+  ]);
 }
 
 function toHuman(base: bigint, decimals: number): number {
@@ -193,7 +197,10 @@ class ArbScanner {
 
   async getBitflowQuote(tokenX: string, tokenY: string, amountHuman: number): Promise<number | null> {
     try {
-      const quote = await this.bitflow.getQuoteForRoute(tokenX, tokenY, amountHuman);
+      const quote = await withTimeout(
+        this.bitflow.getQuoteForRoute(tokenX, tokenY, amountHuman),
+        10000, `Bitflow quote ${tokenX}->${tokenY}`
+      );
       return quote?.bestRoute?.quote ?? null;
     } catch (e: any) {
       log(`  Bitflow quote ${tokenX}->${tokenY} failed: ${e.message}`);
@@ -203,7 +210,10 @@ class ArbScanner {
 
   async getAlexQuote(currencyX: string, amountBase: bigint, currencyY: string): Promise<bigint | null> {
     try {
-      return await this.alex.getAmountTo(currencyX as Currency, amountBase, currencyY as Currency);
+      return await withTimeout(
+        this.alex.getAmountTo(currencyX as Currency, amountBase, currencyY as Currency),
+        10000, `Alex quote ${currencyX}->${currencyY}`
+      );
     } catch (e: any) {
       log(`  Alex quote ${currencyX}->${currencyY} failed: ${e.message}`);
       return null;

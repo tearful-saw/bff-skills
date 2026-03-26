@@ -26,6 +26,7 @@
 - `netProfitPct`: Profit after estimated gas (0.05 STX). The number that matters.
 - `direction`: Tells you which DEX to buy on first and which to sell on.
 - `buyDex` / `sellDex`: The DEX names for the two legs of the trade.
+- `pairSummaries`: Spread curves at multiple sizes — use to find the optimal trade size.
 
 ## Integration with execution skills
 The output is designed to feed into a swap execution skill:
@@ -40,22 +41,24 @@ The output is designed to feed into a swap execution skill:
 - Stop scanning if 10 consecutive scans show no opportunities
 
 ## Output contract
-Return structured JSON every time. No ambiguous success states.
+All outputs are JSON to stdout with this envelope:
 
 ```json
 {
   "status": "success | error | blocked",
-  "action": "next recommended action for the agent",
+  "action": "doctor | run",
   "data": {},
-  "error": { "code": "", "message": "", "next": "" }
+  "error": "string or null"
 }
 ```
+
+`status` is always one of three values. `error` is a human-readable string when `status` is `error` or `blocked`, otherwise `null`.
 
 ## On error
 - Log the error payload
 - Do not retry silently more than 3 times
 - Surface to user with the `action` field guidance
-- Common errors: API timeout, rate limit, no routes found
+- Common errors: API timeout (10s), rate limit, no routes found
 
 ## On success
 - Report opportunity count and best profit
