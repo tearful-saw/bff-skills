@@ -21,7 +21,7 @@ Autonomous trading agents need to know *where* prices diverge before executing. 
 ## Safety notes
 - **Read-only**: This skill never submits transactions, never moves funds, never accesses wallet keys.
 - No API keys required — uses public endpoints on both DEXes.
-- Rate-limited to respect both APIs (100ms delay between pair scans).
+- Rate-limited to respect both APIs (300ms delay between pair scans).
 - All SDK calls have a 10-second timeout to prevent hangs.
 - All quotes are point-in-time snapshots; prices may move before execution.
 
@@ -101,4 +101,6 @@ All outputs are JSON to stdout. Diagnostic logs go to stderr.
 - Gas estimate is conservative (0.05 STX for 2 transactions)
 - SDK calls timeout after 10 seconds to prevent hangs
 - Does not detect MEV or front-running risk
-- Public API rate limits: Bitflow 500 req/min, Alex standard limits
+- Public API rate limits: Bitflow 500 req/min, Alex uses Hiro API (50 req/min free tier)
+- For faster scans or more pairs, use a Hiro API key ($50+/mo at hiro.so/pricing) via `STACKS_API_KEY` env var
+- Default 300ms delay between quotes balances throughput vs free-tier limits

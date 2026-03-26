@@ -349,7 +349,7 @@ class ArbScanner {
         } catch (e: any) {
           log(`  Scan error for ${tokenMap.symbol} at ${amt} STX: ${e.message}`);
         }
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => setTimeout(r, 300));
       }
 
       // Find the best opportunity for this pair (if any are profitable)
