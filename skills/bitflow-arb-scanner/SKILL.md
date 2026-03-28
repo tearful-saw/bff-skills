@@ -51,8 +51,9 @@ All outputs are JSON to stdout. Diagnostic logs go to stderr.
   "data": {
     "scannedAt": "2026-03-26T20:30:24.380Z",
     "scanAmountsSTX": [1, 10, 50, 100],
-    "gasBufferSTX": 0.05,
+    "gasBufferSTX": 0.5,
     "pairsScanned": 7,
+    "warnings": [],
     "opportunities": [
       {
         "pair": "STX/WELSH",
@@ -98,7 +99,7 @@ All outputs are JSON to stdout. Diagnostic logs go to stderr.
 - Mainnet only (both Bitflow and Alex are mainnet-only)
 - Scans STX-base pairs only to avoid cross-token decimal conversion issues
 - Quotes are snapshots — price slippage between scan and execution is not accounted for
-- Gas estimate is conservative (0.05 STX for 2 transactions)
+- Gas estimate is conservative (0.5 STX for 2 transactions)
 - SDK calls timeout after 10 seconds to prevent hangs
 - Does not detect MEV or front-running risk
 - Public API rate limits: Bitflow 500 req/min, Alex uses Hiro API (50 req/min free tier)

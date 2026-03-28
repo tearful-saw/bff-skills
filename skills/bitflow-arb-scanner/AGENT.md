@@ -23,10 +23,11 @@
 
 ### Key fields
 - `grossProfitPct`: Raw profit before gas costs. Shows the DEX spread.
-- `netProfitPct`: Profit after estimated gas (0.05 STX). The number that matters.
+- `netProfitPct`: Profit after estimated gas (0.5 STX). The number that matters.
 - `direction`: Tells you which DEX to buy on first and which to sell on.
 - `buyDex` / `sellDex`: The DEX names for the two legs of the trade.
 - `pairSummaries`: Spread curves at multiple sizes — use to find the optimal trade size.
+- `warnings`: Array of non-fatal errors encountered during scanning (failed quotes, route checks, timeouts). Check this to understand scan coverage gaps.
 
 ## Integration with execution skills
 The output is designed to feed into a swap execution skill:

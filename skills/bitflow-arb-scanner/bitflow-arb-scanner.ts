@@ -23,7 +23,7 @@ const BITFLOW_CONFIG = {
   KEEPER_API_HOST: "",
 };
 
-const GAS_BUFFER_STX = 0.05; // conservative 2-tx gas estimate
+const GAS_BUFFER_STX = 0.5; // conservative 2-tx gas estimate
 const MIN_PROFIT_PCT = 0.1; // report opportunities above this
 const SCAN_AMOUNTS_STX = [1, 10, 50, 100]; // multi-size scan
 
@@ -87,10 +87,16 @@ class ArbScanner {
   alex: AlexSDK;
   tokenMap: Map<string, TokenMapping> = new Map();
   pairs: [string, string][] = [];
+  warnings: string[] = [];
 
   constructor() {
     this.bitflow = new BitflowSDK(BITFLOW_CONFIG);
     this.alex = new AlexSDK();
+  }
+
+  warn(msg: string) {
+    this.warnings.push(msg);
+    log(`WARN: ${msg}`);
   }
 
   async buildTokenMap() {
@@ -172,7 +178,7 @@ class ArbScanner {
         const targets = await this.bitflow.getAllPossibleTokenY(tokenId);
         if (!targets?.includes(stxId)) continue;
       } catch (e: any) {
-        log(`  Bitflow route check failed for ${tokenId}: ${e.message}`);
+        this.warn(`Bitflow route check failed for ${tokenId}: ${e.message}`);
         continue;
       }
 
@@ -183,7 +189,7 @@ class ArbScanner {
         const route = await this.alex.getRouter(mapToken.alexCurrency as Currency, mapSTX.alexCurrency as Currency);
         if (!route || route.length === 0) continue;
       } catch (e: any) {
-        log(`  Alex route check failed for ${mapToken.symbol}: ${e.message}`);
+        this.warn(`Alex route check failed for ${mapToken.symbol}: ${e.message}`);
         continue;
       }
 
@@ -203,7 +209,7 @@ class ArbScanner {
       );
       return quote?.bestRoute?.quote ?? null;
     } catch (e: any) {
-      log(`  Bitflow quote ${tokenX}->${tokenY} failed: ${e.message}`);
+      this.warn(`Bitflow quote ${tokenX}->${tokenY} failed: ${e.message}`);
       return null;
     }
   }
@@ -215,7 +221,7 @@ class ArbScanner {
         10000, `Alex quote ${currencyX}->${currencyY}`
       );
     } catch (e: any) {
-      log(`  Alex quote ${currencyX}->${currencyY} failed: ${e.message}`);
+      this.warn(`Alex quote ${currencyX}->${currencyY} failed: ${e.message}`);
       return null;
     }
   }
@@ -321,6 +327,7 @@ class ArbScanner {
       scanReadyPairCount: pairs.length,
       scanAmountsSTX: SCAN_AMOUNTS_STX,
       gasBufferSTX: GAS_BUFFER_STX,
+      warnings: this.warnings,
     });
   }
 
@@ -347,7 +354,7 @@ class ArbScanner {
           const result = await this.scanPair(a, b, amt);
           if (result) pairResults.push(result);
         } catch (e: any) {
-          log(`  Scan error for ${tokenMap.symbol} at ${amt} STX: ${e.message}`);
+          this.warn(`Scan error for ${tokenMap.symbol} at ${amt} STX: ${e.message}`);
         }
         await new Promise(r => setTimeout(r, 300));
       }
@@ -384,6 +391,7 @@ class ArbScanner {
       pairsScanned: this.pairs.length,
       opportunities,
       pairSummaries,
+      warnings: this.warnings,
       summary: {
         totalOpportunities: opportunities.length,
         bestOpportunityPair: best?.pair ?? null,
