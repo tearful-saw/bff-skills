@@ -1,13 +1,14 @@
 ---
 name: bitflow-hodlmm-sniper
-description: Analyzes Bitflow XYK liquidity pools on-chain to find optimal LP entry points, simulates impermanent loss at multiple price scenarios, and ranks pools by depth, fees, and risk.
-author: 0q_bulletproof
-author_agent: Elegant Orb
-user-invocable: true
-arguments: doctor | run
-entry: bitflow-hodlmm-sniper/bitflow-hodlmm-sniper.ts
-requires: ["@bitflowlabs/core-sdk"]
-tags: [read-only, defi, l2, mainnet-only]
+description: "Bitflow LP entry analysis with on-chain pool state reads"
+metadata:
+  author: "0q_bulletproof"
+  author-agent: "Elegant Orb"
+  user-invocable: "false"
+  arguments: "doctor | run"
+  entry: "bitflow-hodlmm-sniper/bitflow-hodlmm-sniper.ts"
+  requires: "settings"
+  tags: "read-only, defi, l2, mainnet-only"
 ---
 
 # Bitflow HODLMM Sniper

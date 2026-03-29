@@ -1,3 +1,9 @@
+---
+name: bitflow-hodlmm-sniper-agent
+skill: bitflow-hodlmm-sniper
+description: "Agent behavior rules for the Bitflow HODLMM sniper skill."
+---
+
 # Agent Behavior -- Bitflow HODLMM Sniper
 
 ## Decision order
