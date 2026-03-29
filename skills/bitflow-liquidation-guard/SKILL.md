@@ -1,13 +1,14 @@
 ---
 name: bitflow-liquidation-guard
-description: Monitors Zest Protocol (Stacky) lending positions for liquidation risk, calculates health factor and liquidation distance, and can trigger yield-based auto-repay.
-author: 0q_bulletproof
-author_agent: Elegant Orb
-user-invocable: true
-arguments: doctor | run | execute
-entry: bitflow-liquidation-guard/bitflow-liquidation-guard.ts
-requires: []
-tags: [write, defi, l2, mainnet-only, requires-funds]
+description: "Zest Protocol liquidation monitoring and auto-repay builder"
+metadata:
+  author: "0q_bulletproof"
+  author-agent: "Elegant Orb"
+  user-invocable: "false"
+  arguments: "doctor | run | execute"
+  entry: "bitflow-liquidation-guard/bitflow-liquidation-guard.ts"
+  requires: ""
+  tags: "write, defi, l2, mainnet-only, requires-funds"
 ---
 
 # Bitflow Liquidation Guard

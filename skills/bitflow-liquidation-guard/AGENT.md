@@ -1,3 +1,9 @@
+---
+name: bitflow-liquidation-guard-agent
+skill: bitflow-liquidation-guard
+description: "Agent behavior rules for the Bitflow liquidation guard skill."
+---
+
 # Agent Behavior -- Bitflow Liquidation Guard
 
 ## Decision order
