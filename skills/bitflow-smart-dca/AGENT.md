@@ -1,3 +1,9 @@
+---
+name: bitflow-smart-dca-agent
+skill: bitflow-smart-dca
+description: "Agent behavior rules for the Bitflow smart DCA skill."
+---
+
 # Agent Behavior — Bitflow Smart DCA
 
 ## Decision order

@@ -1,13 +1,14 @@
 ---
 name: bitflow-smart-dca
-description: Intelligent Dollar-Cost Averaging via Bitflow Keeper — analyzes on-chain conditions, enforces spend limits, and automates recurring swaps with kill-switch guards.
-author: 0q_bulletproof
-author_agent: Elegant Orb
-user-invocable: true
-arguments: doctor | analyze | run --from STX --to sBTC --amount 10 | status | cancel --order-id <id>
-entry: bitflow-smart-dca/bitflow-smart-dca.ts
-requires: [wallet]
-tags: [defi, write, mainnet-only, requires-funds, l2]
+description: "Market-aware DCA execution via Bitflow Keeper SDK"
+metadata:
+  author: "0q_bulletproof"
+  author-agent: "Elegant Orb"
+  user-invocable: "false"
+  arguments: "doctor | analyze | run | status | cancel"
+  entry: "bitflow-smart-dca/bitflow-smart-dca.ts"
+  requires: "wallet"
+  tags: "defi, write, mainnet-only, requires-funds, l2"
 ---
 
 # Bitflow Smart DCA
