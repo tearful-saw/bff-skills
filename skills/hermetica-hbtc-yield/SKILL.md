@@ -57,7 +57,7 @@ bun run hermetica-hbtc-yield/hermetica-hbtc-yield.ts doctor
 
 ### status
 
-Shows current hBTC position, share price, sBTC value, USD value estimate, live APY from Hermetica API, and any pending redemption claims. Read-only.
+Shows current hBTC position, share price, sBTC value, USD value estimate, and live APY from Hermetica API. Read-only.
 
 ```bash
 bun run hermetica-hbtc-yield/hermetica-hbtc-yield.ts status
@@ -91,14 +91,26 @@ bun run hermetica-hbtc-yield/hermetica-hbtc-yield.ts redeem --claim-id 1
 
 All outputs are JSON to stdout. Diagnostic logs go to stderr.
 
-**Success:**
+**Success (read-only commands):**
+```json
+{
+  "status": "ok",
+  "command": "status",
+  "data": { "hbtcBalanceShares": 10000, "sharePrice": 1.002, "..." : "..." }
+}
+```
+
+**Success (write commands):**
+Write commands emit an `mcpCommand` payload. The calling agent must invoke the MCP `contract-call` tool with those arguments to actually submit the transaction.
 ```json
 {
   "status": "ok",
   "command": "deposit",
   "data": {
-    "txId": "0xabc...",
-    "amountSats": 10000,
+    "action": "execute-contract-call",
+    "contractCall": { "contractAddress": "...", "contractName": "vault-hbtc-v1", "functionName": "deposit", "functionArgs": ["..."], "postConditions": ["..."] },
+    "humanReadable": { "description": "Deposit 10000 sats...", "amountSats": 10000 },
+    "mcpCommand": { "tool": "contract-call", "args": { "contract": "...", "function": "deposit", "arguments": ["u10000", "none"] } },
     "warnings": []
   }
 }

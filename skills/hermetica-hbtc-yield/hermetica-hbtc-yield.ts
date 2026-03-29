@@ -8,7 +8,7 @@
  *
  * Commands:
  *   doctor          — check wallet, balances, vault state
- *   status          — current position, APY, pending claims
+ *   status          — current position, APY, vault state
  *   deposit         — deposit sBTC into hBTC vault
  *   request-redeem  — request withdrawal (initiates cooldown)
  *   redeem          — collect sBTC after cooldown
@@ -56,9 +56,6 @@ const MAX_DEPOSIT_SATS = 50_000;
 
 /** Minimum STX balance required for gas (conservative estimate for contract calls) */
 const MIN_GAS_STX = 0.5;
-
-/** BTC/USD price estimate for display purposes (fetched live when possible) */
-const FALLBACK_BTC_USD = 87_000;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -256,40 +253,9 @@ async function getWalletAddress(): Promise<string | null> {
 
 /**
  * Get sBTC balance for an address (in sats).
+ * Uses the Hiro token-holdings API which doesn't require c32-encoded arguments.
  */
 async function getSbtcBalance(address: string): Promise<number> {
-  try {
-    const [contractAddr, contractName] = SBTC_CONTRACT.split(".");
-    const url = `${STACKS_API}/v2/contracts/call-read/${contractAddr}/${contractName}/get-balance`;
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sender: address,
-        arguments: [`0x0516${addressToHex(address)}`],
-      }),
-    });
-
-    if (!resp.ok) {
-      // Fallback: use token balances API
-      return await getSbtcBalanceFallback(address);
-    }
-
-    const result = await resp.json() as any;
-    if (result.okay === "true" && result.result) {
-      const cv = parseClarityValue(result.result);
-      return clarityToNumber(cv);
-    }
-    return await getSbtcBalanceFallback(address);
-  } catch {
-    return await getSbtcBalanceFallback(address);
-  }
-}
-
-/**
- * Fallback: get sBTC balance via token holdings API.
- */
-async function getSbtcBalanceFallback(address: string): Promise<number> {
   const url = `${STACKS_API}/extended/v1/address/${address}/balances`;
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`Balance API failed: ${resp.status}`);
@@ -338,29 +304,6 @@ async function getStxBalance(address: string): Promise<number> {
   if (!resp.ok) throw new Error(`STX balance API failed: ${resp.status}`);
   const data = await resp.json() as any;
   return parseInt(data.balance || "0", 10) / 1_000_000; // Convert uSTX to STX
-}
-
-/**
- * Convert a Stacks address to hex for Clarity principal encoding.
- * This is a simplified version — for full encoding, use the Stacks.js library.
- */
-function addressToHex(address: string): string {
-  // For read-only calls, we can use the address directly in the sender field
-  // The hex encoding is needed for arguments
-  // Use a simplified c32 decode approach
-  const C32_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-  const addr = address.slice(2); // Remove SP/SM prefix
-  let num = BigInt(0);
-  for (const char of addr) {
-    const idx = C32_ALPHABET.indexOf(char.toUpperCase());
-    if (idx === -1) continue;
-    num = num * 32n + BigInt(idx);
-  }
-  let hex = num.toString(16);
-  // Pad to 40 chars (20 bytes for hash160)
-  while (hex.length < 40) hex = "0" + hex;
-  // Take last 40 chars (20 bytes)
-  return hex.slice(-40);
 }
 
 // ─── Hermetica API Helpers ───────────────────────────────────────────────────
@@ -588,7 +531,7 @@ async function cmdDoctor(): Promise<void> {
 }
 
 /**
- * status — Show current position, APY, value, pending claims.
+ * status — Show current position, APY, value, vault state.
  */
 async function cmdStatus(): Promise<void> {
   const warnings: string[] = [];
@@ -599,18 +542,22 @@ async function cmdStatus(): Promise<void> {
   }
 
   // Fetch all data in parallel
-  const [hbtcBal, sbtcBal, rate, apy, totalAssets, depositCap] = await Promise.all([
+  const [hbtcBal, sbtcBal, rate, apy, totalAssets, depositCap, depositEnabled] = await Promise.all([
     getHbtcBalance(walletAddr),
     getSbtcBalance(walletAddr),
     fetchHbtcRate(),
     fetchHbtcApy(),
     getTotalAssets(),
     getDepositCap(),
+    isDepositEnabled(),
   ]);
 
   // Calculate position value
   const positionValueSats = Math.floor(hbtcBal * rate);
-  const yieldEarnedSats = positionValueSats - hbtcBal; // Difference is yield (since 1 hBTC was 1 sBTC at deposit)
+  // Approximation: assumes all shares were minted at a 1:1 rate.
+  // Actual yield depends on the share price at each deposit time, which
+  // we don't track. This is a best-effort estimate for display purposes.
+  const yieldEarnedSats = positionValueSats - hbtcBal;
 
   // APY data
   let apyPct: number | null = null;
@@ -641,7 +588,7 @@ async function cmdStatus(): Promise<void> {
     vaultTotalAssetsSats: totalAssets,
     vaultDepositCapSats: depositCap,
     vaultUtilizationPct,
-    depositEnabled: await isDepositEnabled(),
+    depositEnabled,
     maxDepositSats: MAX_DEPOSIT_SATS,
     warnings,
   };
@@ -744,7 +691,15 @@ async function cmdDeposit(amountSatsRaw: string): Promise<void> {
         { type: "uint128", value: amountSats.toString() },
         { type: "none" }, // no affiliate
       ],
-      postConditions: [],
+      postConditions: [
+        {
+          type: "ft-postcondition",
+          address: walletAddr,
+          conditionCode: "eq",
+          amount: amountSats.toString(),
+          asset: SBTC_CONTRACT + "::sbtc",
+        },
+      ],
     };
 
     // Output the MCP command for the agent to execute
@@ -841,6 +796,15 @@ async function cmdRequestRedeem(sharesRaw: string, isExpress: boolean): Promise<
         { type: "uint128", value: shares.toString() },
         { type: "bool", value: isExpress },
       ],
+      postConditions: [
+        {
+          type: "ft-postcondition",
+          address: walletAddr,
+          conditionCode: "eq",
+          amount: shares.toString(),
+          asset: CONTRACTS.token + "::token-hbtc",
+        },
+      ],
     };
 
     ok("request-redeem", {
@@ -914,6 +878,7 @@ async function cmdRedeem(claimIdRaw: string): Promise<void> {
       functionArgs: [
         { type: "uint128", value: claimId.toString() },
       ],
+      postConditions: [],
     };
 
     ok("redeem", {
@@ -966,7 +931,7 @@ program
 
 program
   .command("status")
-  .description("Show current hBTC position, share price, APY, and pending claims")
+  .description("Show current hBTC position, share price, APY, and vault state")
   .action(async () => {
     try {
       await cmdStatus();

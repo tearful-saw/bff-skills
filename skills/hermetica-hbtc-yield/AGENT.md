@@ -19,7 +19,7 @@ description: "Agent behavior rules for the Hermetica hBTC Yield Manager — auto
 | Command | Type | Description |
 |---|---|---|
 | `doctor` | read-only | Environment and wallet readiness check |
-| `status` | read-only | Current position, APY, share price, pending claims |
+| `status` | read-only | Current position, APY, share price |
 | `deposit --amount <sats>` | write | Deposit sBTC into hBTC vault (max 50,000 sats) |
 | `request-redeem --shares <amount> [--express]` | write | Request withdrawal with cooldown |
 | `redeem --claim-id <id>` | write | Collect sBTC after cooldown |
@@ -38,7 +38,7 @@ description: "Agent behavior rules for the Hermetica hBTC Yield Manager — auto
 
 - **When to deposit**: When agent holds idle sBTC and hBTC vault APY exceeds the agent's minimum yield threshold. Current APY is ~6%.
 - **When to redeem**: When agent needs sBTC for another operation, or when yield has dropped below threshold.
-- **Cooldown awareness**: After `request-redeem`, the agent must wait for the cooldown period before calling `redeem`. Use `status` to check pending claims.
+- **Cooldown awareness**: After `request-redeem`, the agent must wait for the cooldown period before calling `redeem`. Use `status` to check the current position.
 - **Express redemption**: Use `--express` flag only when urgency justifies the higher cost.
 
 ## Interpreting results
@@ -53,22 +53,20 @@ description: "Agent behavior rules for the Hermetica hBTC Yield Manager — auto
 ### status output
 - `positionValueSats` — Current position value in sBTC sats.
 - `apyPct` — Current 7-day trailing APY from Hermetica API.
-- `pendingClaims` — Array of pending redemption claims with cooldown status.
 - `warnings` — Non-fatal issues (API unavailable, using cached data, etc.).
 
-### deposit output
-- `txId` — The on-chain transaction hash. Verify on explorer if needed.
-- `amountSats` — Actual amount deposited.
-- `expectedShares` — Estimated hBTC shares to receive.
+### Write command outputs (deposit, request-redeem, redeem)
 
-### request-redeem output
-- `txId` — Transaction hash for the redemption request.
-- `claimId` — ID needed to call `redeem` later.
-- `cooldownEnds` — Estimated timestamp when redemption becomes available.
+Write commands do **not** submit transactions directly. They emit an `mcpCommand` payload that the calling agent must forward to the MCP `contract-call` tool to actually broadcast the transaction.
 
-### redeem output
-- `txId` — Transaction hash for the final redemption.
-- `sbtcReceived` — Amount of sBTC returned to wallet.
+Returned JSON shape:
+- `action` — Always `"execute-contract-call"`.
+- `contractCall` — Object with `contractAddress`, `contractName`, `functionName`, `functionArgs`, and `postConditions`.
+- `humanReadable` — Summary for logging: description, contract, function, amounts, share price, etc.
+- `mcpCommand` — Object with `tool` (always `"contract-call"`) and `args` (`contract`, `function`, `arguments`). Pass these directly to the MCP contract-call tool to submit the transaction on-chain.
+- `warnings` — Array of non-fatal issues encountered during pre-flight checks.
+
+**Two-step flow**: the skill validates inputs and builds the call, then the agent must invoke the MCP contract-call tool with the `mcpCommand.args` to actually submit the transaction.
 
 ## On error
 
@@ -81,8 +79,8 @@ description: "Agent behavior rules for the Hermetica hBTC Yield Manager — auto
 
 ## On success
 
-- For write operations: confirm the `txId` on-chain via Stacks explorer.
+- For write operations: pass the `mcpCommand` to the MCP contract-call tool to submit the transaction, then confirm the resulting txId on-chain via Stacks explorer.
 - After deposit: run `status` to verify the new position.
-- After request-redeem: note the `claimId` and `cooldownEnds` for scheduling the `redeem` call.
+- After request-redeem: note the claim ID for scheduling the `redeem` call. Use `status` to monitor cooldown.
 - After redeem: run `status` to verify updated balances.
 - Report completion with a summary of what changed.
