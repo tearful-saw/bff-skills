@@ -1,3 +1,9 @@
+---
+name: bitflow-arb-scanner-agent
+skill: bitflow-arb-scanner
+description: "Agent behavior rules for the Bitflow arb scanner skill."
+---
+
 # Agent Behavior — Bitflow Arb Scanner
 
 ## Decision order

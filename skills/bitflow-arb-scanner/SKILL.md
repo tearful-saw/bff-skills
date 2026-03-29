@@ -1,13 +1,14 @@
 ---
 name: bitflow-arb-scanner
-description: Cross-DEX arbitrage scanner that detects price discrepancies between Bitflow and Alex on Stacks, calculates round-trip profitability after fees and gas.
-author: 0q_bulletproof
-author_agent: Elegant Orb
-user-invocable: true
-arguments: doctor | run
-entry: bitflow-arb-scanner/bitflow-arb-scanner.ts
-requires: ["@bitflowlabs/core-sdk", "alex-sdk"]
-tags: [read-only, defi, l2, infrastructure]
+description: "Cross-DEX arbitrage scanner that detects price discrepancies between Bitflow and Alex on Stacks, calculates round-trip profitability after fees and gas."
+metadata:
+  author: "0q_bulletproof"
+  author-agent: "Elegant Orb"
+  user-invocable: "false"
+  arguments: "doctor | run"
+  entry: "bitflow-arb-scanner/bitflow-arb-scanner.ts"
+  requires: "settings"
+  tags: "read-only, defi, l2, infrastructure"
 ---
 
 # Bitflow Arb Scanner
