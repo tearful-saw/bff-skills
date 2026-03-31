@@ -17,16 +17,16 @@ import { homedir } from "os";
 
 // ─── Config ───────────────────────────────────────────────────────────────
 const BITFLOW_CONFIG = {
-  BITFLOW_API_HOST: "https://bitflowsdk-api.uk.gateway.dev",
+  BITFLOW_API_HOST: "https://bitflowsdk-api-test-7owjsmt8.uk.gateway.dev",
   READONLY_CALL_API_HOST: "https://api.hiro.so",
   BITFLOW_PROVIDER_ADDRESS: "",
   READONLY_CALL_API_KEY: "",
-  KEEPER_API_HOST: "https://bitflow-keeper.uc.gateway.dev",
+  KEEPER_API_HOST: "https://bitflow-keeper-test-7owjsmt8.uc.gateway.dev",
 };
 
 const MEMPOOL_API = "https://mempool.space/api";
 const HIRO_API = "https://api.hiro.so";
-const HODLMM_API = "https://api.bitflow.finance/api/v1/hodlmm";
+const HODLMM_API = "https://bff.bitflowapis.finance/api/quotes/v1";
 const HODLMM_APP_API = "https://bff.bitflowapis.finance";
 
 // Safety limits
@@ -244,9 +244,11 @@ interface HodlmmBin {
 
 async function fetchPoolInfo(poolId: string): Promise<HodlmmPoolInfo | null> {
   try {
-    const r = await fetch(`${HODLMM_API}/pools/${poolId}`);
+    const r = await fetch(`${HODLMM_API}/pools`);
     if (!r.ok) return null;
-    return await r.json() as HodlmmPoolInfo;
+    const d = await r.json() as any;
+    const pools = d.pools || [];
+    return pools.find((p: any) => p.pool_id === poolId) || null;
   } catch {
     return null;
   }
@@ -254,7 +256,7 @@ async function fetchPoolInfo(poolId: string): Promise<HodlmmPoolInfo | null> {
 
 async function fetchPoolBins(poolId: string): Promise<{ active_bin_id: number; bins: HodlmmBin[] } | null> {
   try {
-    const r = await fetch(`${HODLMM_API}/pools/${poolId}/bins`);
+    const r = await fetch(`${HODLMM_API}/bins/${poolId}`);
     if (!r.ok) return null;
     return await r.json() as any;
   } catch {
@@ -264,7 +266,7 @@ async function fetchPoolBins(poolId: string): Promise<{ active_bin_id: number; b
 
 async function fetchUserPositions(poolId: string, address: string): Promise<{ bins: HodlmmBin[] } | null> {
   try {
-    const r = await fetch(`${HODLMM_API}/pools/${poolId}/positions/${address}`);
+    const r = await fetch(`${HODLMM_APP_API}/api/app/v1/users/${address}/positions/${poolId}/bins`);
     if (!r.ok) return null;
     return await r.json() as any;
   } catch {
