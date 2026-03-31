@@ -400,8 +400,11 @@ program
       const inRange = userBinIds.includes(activeBin);
 
       // Profitability check: fees must exceed MIN_HARVEST_MULTIPLIER * gas
+      // Simplified: treat fee sats as value proxy. 1 STX gas ≈ 500 sats at typical rates.
       const harvestGas = gasCostSTX * 2; // withdraw + re-deposit
-      const profitable = totalFeeX > 0 || totalFeeY > 0; // simplified; real check needs price
+      const minFeeSatsForHarvest = harvestGas * 500 * MIN_HARVEST_MULTIPLIER;
+      const totalFeeSats = totalFeeX + totalFeeY;
+      const profitable = totalFeeSats >= minFeeSatsForHarvest;
 
       results.push({
         poolId,
@@ -414,7 +417,9 @@ program
         totalFeeX: String(totalFeeX),
         totalFeeY: String(totalFeeY),
         estimatedHarvestGasSTX: harvestGas,
-        profitable: profitable && (totalFeeX > 0 || totalFeeY > 0),
+        minFeeSatsForHarvest,
+        totalFeeSats,
+        profitable,
         poolStats: appStats
           ? {
               apr24h: appStats.apr24h,
@@ -517,6 +522,18 @@ program
     // Gas check
     const gasPerTx = DEFAULT_GAS_ESTIMATE_STX;
     const totalGas = gasPerTx * (redeposit ? 2 : 1); // withdraw + optional re-deposit
+
+    // Profitability gate: fees must exceed MIN_HARVEST_MULTIPLIER * gas
+    const minFeeSatsForHarvest = totalGas * 500 * MIN_HARVEST_MULTIPLIER;
+    const totalFeeSats = totalFeeX + totalFeeY;
+    if (totalFeeSats < minFeeSatsForHarvest) {
+      output("blocked", "harvest", {
+        totalFeeSats,
+        minFeeSatsForHarvest,
+        estimatedGasSTX: totalGas,
+      }, `Fees (${totalFeeSats} sats) below profitability threshold (${minFeeSatsForHarvest} sats = ${MIN_HARVEST_MULTIPLIER}x gas). Not worth harvesting yet.`);
+      return;
+    }
 
     if (totalGas > MAX_GAS_STX) {
       output("blocked", "harvest", null, `Estimated gas ${totalGas} STX exceeds max (${MAX_GAS_STX} STX).`);
@@ -691,4 +708,18 @@ program
     });
   });
 
-program.parse();
+program.exitOverride();
+program.configureOutput({
+  writeOut: (str) => console.error(str),
+  writeErr: (str) => console.error(str),
+  outputError: (str) => console.error(str),
+});
+
+try {
+  await program.parseAsync();
+} catch (e: any) {
+  if (e.code === "commander.helpDisplayed" || e.code === "commander.version") process.exit(0);
+  const msg = e.message?.replace(/^error: /, "") || String(e);
+  output("error", "cli", null, msg);
+  process.exit(1);
+}
