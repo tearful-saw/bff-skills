@@ -17,11 +17,11 @@ import { homedir } from "os";
 
 // ─── Config ───────────────────────────────────────────────────────────────
 const BITFLOW_CONFIG = {
-  BITFLOW_API_HOST: "https://bitflowsdk-api-test-7owjsmt8.uk.gateway.dev",
+  BITFLOW_API_HOST: "https://bitflowsdk-api.uk.gateway.dev",
   READONLY_CALL_API_HOST: "https://api.hiro.so",
   BITFLOW_PROVIDER_ADDRESS: "",
   READONLY_CALL_API_KEY: "",
-  KEEPER_API_HOST: "https://bitflow-keeper-test-7owjsmt8.uc.gateway.dev",
+  KEEPER_API_HOST: "https://bitflow-keeper.uc.gateway.dev",
 };
 
 const MEMPOOL_API = "https://mempool.space/api";
@@ -139,16 +139,16 @@ async function fetchMarketConditions(stxAddress: string): Promise<MarketConditio
   if (fetches[3].status === "fulfilled") {
     const d = fetches[3].value as any;
     results.difficultyAdjustment = {
-      changePct: Math.round((d.difficultyChange || 0) * 10000) / 100,
+      changePct: Math.round((d.difficultyChange || 0) * 100) / 100,
       blocksRemaining: d.remainingBlocks || 0,
     };
   }
   if (fetches[4].status === "fulfilled") {
     const d = fetches[4].value as any;
     results.stxBalance = parseInt(d.stx?.balance || "0") / 1e6;
-    const sbtcKey = Object.keys(d.fungible_tokens || {}).find(k => k.includes("sbtc"));
-    if (sbtcKey) {
-      results.sbtcBalance = parseInt(d.fungible_tokens[sbtcKey].balance || "0");
+    const SBTC_CONTRACT = "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token::sbtc-token";
+    if (d.fungible_tokens?.[SBTC_CONTRACT]) {
+      results.sbtcBalance = parseInt(d.fungible_tokens[SBTC_CONTRACT].balance || "0");
     }
   }
 
@@ -291,12 +291,13 @@ function buildDeployBins(activeBin: number, totalSats: number, range: number): {
 
   for (let offset = -range; offset <= range; offset++) {
     const binId = activeBin + offset;
-    // sBTC goes into amount_x for sBTC-paired pools
-    bins.push({
-      bin_id: binId,
-      amount_x: String(perBinSats),
-      amount_y: "0",
-    });
+    // Bins below active: token_y only (quote side)
+    // Bins at/above active: token_x only (base side, sBTC)
+    if (offset < 0) {
+      bins.push({ bin_id: binId, amount_x: "0", amount_y: String(perBinSats) });
+    } else {
+      bins.push({ bin_id: binId, amount_x: String(perBinSats), amount_y: "0" });
+    }
   }
 
   return bins;
@@ -531,7 +532,9 @@ program
       });
       const contractId = keeper.keeperContract.contractIdentifier;
 
-      const tokenXDecimals = quote.bestRoute.tokenXDecimals ?? 6;
+      // STX = 6 decimals, sBTC = 8 decimals
+      const KNOWN_DECIMALS: Record<string, number> = { "token-stx": 6, "token-sbtc": 8, "token-welsh": 6, "token-alex": 8 };
+      const tokenXDecimals = quote.bestRoute.tokenXDecimals ?? KNOWN_DECIMALS[resolvedFrom] ?? 6;
       const baseAmount = Math.round(amount * 10 ** tokenXDecimals);
 
       const order = await bitflow.createOrder({
