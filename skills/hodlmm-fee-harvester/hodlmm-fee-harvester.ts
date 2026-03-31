@@ -21,7 +21,7 @@ import { join } from "path";
 import { homedir } from "os";
 
 // ─── Config ───────────────────────────────────────────────────────────────
-const HODLMM_API = "https://api.bitflow.finance/api/v1/hodlmm";
+const HODLMM_API = "https://bff.bitflowapis.finance/api/quotes/v1";
 const HODLMM_APP_API = "https://bff.bitflowapis.finance";
 const HIRO_API = "https://api.hiro.so";
 
@@ -124,19 +124,20 @@ async function fetchJson(url: string): Promise<any> {
 
 async function fetchAllPools(): Promise<PoolInfo[]> {
   const data = await fetchJson(`${HODLMM_API}/pools`);
-  return data || [];
+  return data?.pools || [];
 }
 
 async function fetchPoolInfo(poolId: string): Promise<PoolInfo | null> {
-  return fetchJson(`${HODLMM_API}/pools/${poolId}`);
+  const pools = await fetchAllPools();
+  return pools.find((p: any) => p.pool_id === poolId) || null;
 }
 
 async function fetchPoolBins(poolId: string): Promise<BinsResponse | null> {
-  return fetchJson(`${HODLMM_API}/pools/${poolId}/bins`);
+  return fetchJson(`${HODLMM_API}/bins/${poolId}`);
 }
 
 async function fetchUserPositions(poolId: string, address: string): Promise<BinsResponse | null> {
-  return fetchJson(`${HODLMM_API}/pools/${poolId}/positions/${address}`);
+  return fetchJson(`${HODLMM_APP_API}/api/app/v1/users/${address}/positions/${poolId}/bins`);
 }
 
 async function fetchPoolAppStats(poolId: string): Promise<any> {
