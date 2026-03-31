@@ -549,11 +549,13 @@ program
       const perBinY = Math.floor(totalPrincipalY / binCount);
 
       for (let offset = -DEFAULT_BIN_RANGE; offset <= DEFAULT_BIN_RANGE; offset++) {
-        redepositBins.push({
-          bin_id: activeBin + offset,
-          amount_x: String(perBinX),
-          amount_y: String(perBinY),
-        });
+        // Bins below active: token_y only (quote side)
+        // Bins at/above active: token_x only (base side)
+        if (offset < 0) {
+          redepositBins.push({ bin_id: activeBin + offset, amount_x: "0", amount_y: String(perBinY) });
+        } else {
+          redepositBins.push({ bin_id: activeBin + offset, amount_x: String(perBinX), amount_y: "0" });
+        }
       }
     }
 
