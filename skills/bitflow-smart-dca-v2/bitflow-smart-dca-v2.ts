@@ -379,14 +379,14 @@ program
       checks.sbtcBalance = market.sbtcBalance;
       checks.availableForDCA = Math.max(0, market.stxBalance - MIN_BALANCE_RESERVE_STX);
 
-      // Check Keeper contract
+      // Check Keeper API (read-only — getUser, not getOrCreate)
       try {
-        const keeper = await bitflow.getOrCreateKeeperContract({
-          stacksAddress: stxAddress,
-          keeperType: KeeperType.MULTI_ACTION_V1,
-        });
+        const user = await bitflow.getUser(stxAddress);
         checks.keeperApi = true;
-        checks.keeperContract = keeper?.keeperContract?.contractIdentifier || "available";
+        const contracts = Object.values(user?.user?.keeperContracts || {});
+        checks.keeperContract = contracts.length > 0
+          ? (contracts[0] as any).contractIdentifier
+          : "none — will be created on first run";
       } catch (e: any) {
         checks.keeperApiError = e.message;
       }
@@ -486,9 +486,9 @@ program
       return;
     }
 
-    // Safety: token validation
-    if (!SUPPORTED_TARGETS.includes(resolvedTo) && !SUPPORTED_TARGETS.includes(resolvedFrom)) {
-      output("blocked", "run", null, `Unsupported token pair. Supported: ${SUPPORTED_TARGETS.join(", ")}`);
+    // Safety: token validation — both sides must be supported
+    if (!SUPPORTED_TARGETS.includes(resolvedTo) || !SUPPORTED_TARGETS.includes(resolvedFrom)) {
+      output("blocked", "run", null, `Unsupported token pair: ${resolvedFrom} → ${resolvedTo}. Supported: ${SUPPORTED_TARGETS.join(", ")}`);
       return;
     }
 
@@ -762,4 +762,18 @@ program
     }
   });
 
-program.parse();
+program.exitOverride();
+program.configureOutput({
+  writeOut: (str) => console.error(str),
+  writeErr: (str) => console.error(str),
+  outputError: (str) => console.error(str),
+});
+
+try {
+  await program.parseAsync();
+} catch (e: any) {
+  if (e.code === "commander.helpDisplayed" || e.code === "commander.version") process.exit(0);
+  const msg = e.message?.replace(/^error: /, "") || String(e);
+  output("error", "cli", null, msg);
+  process.exit(1);
+}
