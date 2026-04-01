@@ -109,6 +109,7 @@ interface BinData {
   bin_id: number;
   reserve_x: string;
   reserve_y: string;
+  userLiquidity?: number;
 }
 
 interface BinsResponse {
@@ -137,7 +138,16 @@ async function fetchPoolBins(poolId: string): Promise<BinsResponse | null> {
 }
 
 async function fetchUserPositions(poolId: string, address: string): Promise<BinsResponse | null> {
-  return fetchJson(`${HODLMM_APP_API}/api/app/v1/users/${address}/positions/${poolId}/bins`);
+  const data = await fetchJson(`${HODLMM_APP_API}/api/app/v1/users/${address}/positions/${poolId}/bins`);
+  if (!data?.bins) return null;
+  // Normalize: API returns {bin_id, userLiquidity, price} — map to BinData
+  const bins = data.bins.map((b: any) => ({
+    bin_id: parseInt(b.bin_id),
+    reserve_x: String(Math.floor(b.userLiquidity || 0)),
+    reserve_y: "0",
+    userLiquidity: b.userLiquidity || 0,
+  }));
+  return { active_bin_id: 0, bins };
 }
 
 async function fetchPoolAppStats(poolId: string): Promise<any> {
