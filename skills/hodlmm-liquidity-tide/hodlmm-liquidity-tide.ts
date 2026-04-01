@@ -212,14 +212,14 @@ interface TideSignal {
   momentum: number; // absolute magnitude of flow rate
   confidence: "high" | "medium" | "low";
   signal: "ENTER" | "EXIT" | "CAUTION" | "WAIT" | "HOLD";
-  flowRate1h: string | null;
-  flowRate4h: string | null;
-  flowRate24h: string | null;
-  reserveFlowPct1h: number | null; // token-unit based (price-independent)
-  tvlFlowPct1h: number | null; // USD based (includes price effects)
+  liquidityFlowPct1h: string | null; // LP shares (only changes on add/remove)
+  liquidityFlowPct4h: string | null;
+  liquidityFlowPct24h: string | null;
+  reserveXFlowPct1h: string | null; // per-token context (includes swap noise)
+  reserveYFlowPct1h: string | null;
+  tvlFlowPct1h: string | null; // USD (includes price effects)
   currentTvlUsd: number;
-  currentReserveX: number;
-  currentReserveY: number;
+  currentLiquidity: number; // LP share total
   activeBin: number;
   activeBinCount: number;
   snapshotsUsed: number;
@@ -265,8 +265,16 @@ function analyzeTide(
   const latestPool = latest.pools.find((p) => p.poolId === poolId);
   if (!latestPool) return null;
 
-  // Calculate flow rates for each window
-  const flowRates: Record<string, { reservePct: number; tvlPct: number } | null> = {};
+  // Calculate flow rates for each window using LP share totals (totalLiquidity).
+  // LP shares only change when liquidity is added or removed — swaps shift
+  // reserves between X and Y but leave the share supply unchanged. This
+  // separates genuine LP flow from normal trading activity.
+  const flowRates: Record<string, {
+    liquidityPct: number; // primary: LP shares (swap-independent)
+    reserveXPct: number; // context only
+    reserveYPct: number; // context only
+    tvlPct: number; // includes price effects
+  } | null> = {};
 
   for (const [windowName, windowMinutes] of Object.entries(WINDOWS)) {
     const oldSnap = findSnapshotAtWindow(snapshots, latest.epochMs, windowMinutes);
@@ -281,15 +289,17 @@ function analyzeTide(
       continue;
     }
 
-    // Reserve-based flow (price-independent) — use combined reserve magnitude
-    const currentReserve = latestPool.totalReserveX + latestPool.totalReserveY;
-    const oldReserve = oldPool.totalReserveX + oldPool.totalReserveY;
-    const reservePct = pctChange(currentReserve, oldReserve);
+    // Primary metric: LP share change (price- and swap-independent)
+    const liquidityPct = pctChange(latestPool.totalLiquidity, oldPool.totalLiquidity);
+
+    // Per-token reserve context (includes swap noise, tracked separately)
+    const reserveXPct = pctChange(latestPool.totalReserveX, oldPool.totalReserveX);
+    const reserveYPct = pctChange(latestPool.totalReserveY, oldPool.totalReserveY);
 
     // TVL-based flow (includes price effects)
     const tvlPct = pctChange(latestPool.tvlUsd, oldPool.tvlUsd);
 
-    flowRates[windowName] = { reservePct, tvlPct };
+    flowRates[windowName] = { liquidityPct, reserveXPct, reserveYPct, tvlPct };
   }
 
   // Determine tide using the shortest available window for responsiveness
@@ -299,21 +309,19 @@ function analyzeTide(
 
   for (const windowName of ["1h", "4h", "24h"]) {
     if (flowRates[windowName]) {
-      primaryFlow = flowRates[windowName]!.reservePct;
+      primaryFlow = flowRates[windowName]!.liquidityPct;
       primaryWindow = windowName;
       break;
     }
   }
 
   if (primaryFlow === null) {
-    // Use raw first-to-last comparison
+    // Use raw first-to-last comparison on LP shares
     const firstSnap = snapshots[0];
     const firstPool = firstSnap.pools.find((p) => p.poolId === poolId);
     if (!firstPool) return null;
 
-    const currentReserve = latestPool.totalReserveX + latestPool.totalReserveY;
-    const firstReserve = firstPool.totalReserveX + firstPool.totalReserveY;
-    primaryFlow = pctChange(currentReserve, firstReserve);
+    primaryFlow = pctChange(latestPool.totalLiquidity, firstPool.totalLiquidity);
     primaryWindow = "raw";
   }
 
@@ -362,14 +370,14 @@ function analyzeTide(
     momentum: Math.round(momentum * 100) / 100,
     confidence,
     signal,
-    flowRate1h: formatPct(flowRates["1h"]?.reservePct ?? null),
-    flowRate4h: formatPct(flowRates["4h"]?.reservePct ?? null),
-    flowRate24h: formatPct(flowRates["24h"]?.reservePct ?? null),
-    reserveFlowPct1h: flowRates["1h"]?.reservePct ?? null,
-    tvlFlowPct1h: flowRates["1h"]?.tvlPct ?? null,
+    liquidityFlowPct1h: formatPct(flowRates["1h"]?.liquidityPct ?? null),
+    liquidityFlowPct4h: formatPct(flowRates["4h"]?.liquidityPct ?? null),
+    liquidityFlowPct24h: formatPct(flowRates["24h"]?.liquidityPct ?? null),
+    reserveXFlowPct1h: formatPct(flowRates["1h"]?.reserveXPct ?? null),
+    reserveYFlowPct1h: formatPct(flowRates["1h"]?.reserveYPct ?? null),
+    tvlFlowPct1h: formatPct(flowRates["1h"]?.tvlPct ?? null),
     currentTvlUsd: latestPool.tvlUsd,
-    currentReserveX: latestPool.totalReserveX,
-    currentReserveY: latestPool.totalReserveY,
+    currentLiquidity: latestPool.totalLiquidity,
     activeBin: latestPool.activeBin,
     activeBinCount: latestPool.activeBinCount,
     snapshotsUsed: snapshots.length,
@@ -482,14 +490,13 @@ program
       deltas = snapshot.pools.map((current) => {
         const old = prev.pools.find((p) => p.poolId === current.poolId);
         if (!old) return { poolId: current.poolId, delta: "new pool" };
-        const reserveNow = current.totalReserveX + current.totalReserveY;
-        const reserveThen = old.totalReserveX + old.totalReserveY;
-        const changePct = pctChange(reserveNow, reserveThen);
+        // Use LP share change as primary flow indicator (swap-independent)
+        const liqChangePct = pctChange(current.totalLiquidity, old.totalLiquidity);
         return {
           poolId: current.poolId,
-          reserveChangePct: formatPct(changePct),
+          liquidityChangePct: formatPct(liqChangePct),
           tvlChangePct: formatPct(pctChange(current.tvlUsd, old.tvlUsd)),
-          direction: changePct > 0.1 ? "INFLOW" : changePct < -0.1 ? "OUTFLOW" : "STABLE",
+          direction: liqChangePct > 0.1 ? "INFLOW" : liqChangePct < -0.1 ? "OUTFLOW" : "STABLE",
         };
       });
     }
@@ -622,14 +629,12 @@ program
           activeBinCount: pool.activeBinCount,
         };
 
-        // Delta from previous snapshot
+        // Delta from previous snapshot (LP shares = swap-independent)
         if (i > 0) {
           const prevSnap = recentSnapshots[i - 1];
           const prevPool = prevSnap.pools.find((p) => p.poolId === pool.poolId);
           if (prevPool) {
-            const reserveNow = pool.totalReserveX + pool.totalReserveY;
-            const reserveThen = prevPool.totalReserveX + prevPool.totalReserveY;
-            poolEntry.reserveChangePct = formatPct(pctChange(reserveNow, reserveThen));
+            poolEntry.liquidityChangePct = formatPct(pctChange(pool.totalLiquidity, prevPool.totalLiquidity));
             poolEntry.tvlChangePct = formatPct(pctChange(pool.tvlUsd, prevPool.tvlUsd));
           }
         }

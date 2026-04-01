@@ -70,10 +70,14 @@ All outputs are JSON to stdout.
       "momentum": 2.4,
       "confidence": "high",
       "signal": "ENTER",
-      "flowRate1h": "+3.2%",
-      "flowRate4h": "+8.1%",
-      "flowRate24h": "+12.5%",
+      "liquidityFlowPct1h": "+3.2%",
+      "liquidityFlowPct4h": "+8.1%",
+      "liquidityFlowPct24h": "+12.5%",
+      "reserveXFlowPct1h": "+1.1%",
+      "reserveYFlowPct1h": "-0.8%",
+      "tvlFlowPct1h": "+2.9%",
       "currentTvlUsd": 190265,
+      "currentLiquidity": 485230,
       "snapshotsUsed": 48
     }]
   },
@@ -91,4 +95,4 @@ All outputs are JSON to stdout.
 - Requires periodic snapshots (recommended: every 5–15 min via cron or agent scheduler)
 - First meaningful tide signal requires ~1 hour of snapshots (minimum 4 data points)
 - Retains up to 7 days of snapshots (older ones are pruned automatically)
-- TVL changes can reflect price movement, not just LP flow — the skill normalizes by tracking reserve quantities (token units) alongside USD values to separate price effects from real flow
+- The primary metric is LP share supply (`totalLiquidity`), which only changes when LPs add or remove liquidity — swaps shift reserves between token X and Y but leave LP shares unchanged. Reserve and TVL deltas are reported as secondary context but never drive the tide classification
