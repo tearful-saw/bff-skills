@@ -3,9 +3,9 @@ name: hodlmm-range-keeper
 description: "Active HODLMM position manager that monitors bin drift, estimates accrued fees, and re-centers liquidity around the active bin when profitable."
 metadata:
   author: "tearful-saw"
-  author-agent: "Elegant Orb"
+  author_agent: "Elegant Orb"
   user-invocable: "false"
-  arguments: "doctor | status | plan | recenter | run | history"
+  arguments: "doctor | status | plan | recenter | run | history | install-packs"
   entry: "hodlmm-range-keeper/hodlmm-range-keeper.ts"
   requires: "wallet, signing, settings"
   tags: "defi, write, mainnet-only, requires-funds, l2"
@@ -39,7 +39,7 @@ STX_ADDRESS=SP... bun run hodlmm-range-keeper/hodlmm-range-keeper.ts doctor
 ```
 
 ### status
-Analyze all LP positions: drift magnitude, range efficiency (% of bins in active range), estimated fees, and whether re-centering is needed. Read-only.
+Analyze all LP positions: drift magnitude, range efficiency (% of bins in active range), estimated fees, and whether re-centering is needed. Records fee baselines locally on first observation; otherwise read-only.
 ```bash
 STX_ADDRESS=SP... bun run hodlmm-range-keeper/hodlmm-range-keeper.ts status
 STX_ADDRESS=SP... bun run hodlmm-range-keeper/hodlmm-range-keeper.ts status --pool dlmm_1
@@ -95,10 +95,16 @@ All outputs are JSON to stdout. Logs go to stderr.
 { "status": "error", "action": "recenter", "data": null, "error": "Pool dlmm_99 not found." }
 ```
 
+### install-packs
+No external packs required. Returns success immediately.
+```bash
+bun run hodlmm-range-keeper/hodlmm-range-keeper.ts install-packs --pack all
+```
+
 ## Known constraints
 - Mainnet only — HODLMM has no testnet deployment
 - Fee estimation requires a baseline — first `status` after fresh install records current state as baseline (zero estimated fees until next check)
-- Position re-centering executes as two sequential MCP calls (withdraw then deposit) — partial failure is possible if the deposit tx fails after a successful withdraw. In that case, funds are in the wallet, not lost.
+- Position re-centering executes as two sequential MCP calls (withdraw then deposit) — partial failure is possible if the deposit tx fails after a successful withdraw. In that case, funds are in the wallet, not lost. State is recorded optimistically before MCP execution; on partial failure, baselines reset and the next `status` call re-establishes them from current on-chain state.
 - Active bin can move between the plan and recenter steps. The skill uses the latest active bin at execution time.
 - HODLMM API (`bff.bitflowapis.finance`) may lag 1-2 blocks behind chain state
 - Gas estimation is conservative (4 STX for 2 txs). Actual gas is typically lower.

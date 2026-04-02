@@ -452,6 +452,18 @@ program
     "Active HODLMM position manager — monitors drift, plans recenters, executes when profitable"
   );
 
+// Redirect Commander help/error output to stderr (JSON-only stdout)
+program.configureOutput({
+  writeOut: (str) => process.stderr.write(str),
+  writeErr: (str) => process.stderr.write(str),
+});
+
+// Global crash handler — always emit JSON
+process.on("unhandledRejection", (err) => {
+  output("error", "crash", null, String(err));
+  process.exit(1);
+});
+
 // ── doctor ───────────────────────────────────────────────────────────────
 program
   .command("doctor")
@@ -536,7 +548,7 @@ program
 // ── status ───────────────────────────────────────────────────────────────
 program
   .command("status")
-  .description("Show position health: drift, fees, range efficiency")
+  .description("Show position health: drift, fees, range efficiency. Records fee baselines locally on first observation.")
   .option("--pool <id>", "Specific pool (default: all with positions)")
   .action(async (opts) => {
     const stxAddress = process.env.STX_ADDRESS;
@@ -991,6 +1003,18 @@ program
       recentersExecuted,
       mode: opts.confirm ? "live" : "dry-run",
       results,
+    });
+  });
+
+// ── install-packs ────────────────────────────────────────────────────────
+program
+  .command("install-packs")
+  .description("Install dependency packs (no external packs required)")
+  .option("--pack <name>", "Pack to install", "all")
+  .action(async () => {
+    output("success", "install-packs", {
+      installed: [],
+      note: "No external packs required. Uses built-in fetch and Commander.js.",
     });
   });
 
