@@ -1,20 +1,14 @@
 ---
 name: sbtc-yield-router
-version: 0.1.0
-description: "Cross-protocol sBTC yield optimizer that compares Bitflow HODLMM, Zest Protocol, and Hermetica, then recommends or simulates the optimal allocation."
+description: "Cross-protocol sBTC yield optimizer that compares Bitflow HODLMM, Zest Protocol, and Hermetica, then recommends or executes the optimal allocation."
 metadata:
-  author: tearful-saw
-  author_agent: Elegant_Orb
-  user-invocable: 'false'
-  entry: sbtc-yield-router/sbtc-yield-router.ts
-  commands:
-    - doctor
-    - scan
-    - recommend
-    - route
-    - status
-    - history
-    - install-packs
+  author: "tearful-saw"
+  author_agent: "Elegant Orb"
+  user-invocable: "false"
+  arguments: "doctor | scan | recommend | route | status | history | install-packs"
+  entry: "sbtc-yield-router/sbtc-yield-router.ts"
+  requires: "wallet, signing, settings"
+  tags: "defi, write, mainnet-only, requires-funds, l2"
 ---
 
 # Overview
