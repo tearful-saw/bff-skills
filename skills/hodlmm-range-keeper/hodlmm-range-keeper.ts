@@ -26,12 +26,6 @@ const HODLMM_API = "https://bff.bitflowapis.finance/api/quotes/v1";
 const HODLMM_APP_API = "https://bff.bitflowapis.finance";
 const HIRO_API = "https://api.hiro.so";
 
-const POOL_CONTRACTS: Record<string, string> = {
-  dlmm_1: "SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-sbtc-usdcx-v-1-bps-10",
-  dlmm_3: "SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-stx-usdcx-v-1-bps-10",
-  dlmm_6: "SM1FKXGNZJWSTWDWXQZJNF7B5TV5ZB235JTCXYXKD.dlmm-pool-stx-sbtc-v-1-bps-15",
-};
-
 // Safety limits
 const MAX_GAS_STX = 50;
 const DEFAULT_GAS_ESTIMATE_STX = 4; // 2 txs: withdraw + deposit
@@ -324,8 +318,7 @@ interface RecenterPlan {
 function planRecenter(
   health: PositionHealth,
   userBins: BinData[],
-  poolState: PoolState,
-  poolContract: string | null
+  poolState: PoolState
 ): RecenterPlan {
   const activeBin = health.activeBin;
   const gasEstimate = DEFAULT_GAS_ESTIMATE_STX;
@@ -338,25 +331,25 @@ function planRecenter(
     amount_y: b.reserve_y || "0",
   }));
 
-  const totalWithdrawX = withdrawBins.reduce((s, b) => s + parseInt(b.amount_x), 0);
-  const totalWithdrawY = withdrawBins.reduce((s, b) => s + parseInt(b.amount_y), 0);
+  const totalWithdrawX = withdrawBins.reduce((s, b) => s + BigInt(b.amount_x), 0n);
+  const totalWithdrawY = withdrawBins.reduce((s, b) => s + BigInt(b.amount_y), 0n);
 
   // Calculate fees (growth over baseline)
-  let totalBaselineX = 0;
-  let totalBaselineY = 0;
+  let totalBaselineX = 0n;
+  let totalBaselineY = 0n;
   let hasBaseline = false;
 
   for (const bin of userBins) {
     const baseline = poolState.baselines[bin.bin_id];
     if (baseline) {
       hasBaseline = true;
-      totalBaselineX += parseInt(baseline.depositX || "0");
-      totalBaselineY += parseInt(baseline.depositY || "0");
+      totalBaselineX += BigInt(baseline.depositX || "0");
+      totalBaselineY += BigInt(baseline.depositY || "0");
     }
   }
 
-  const feesX = hasBaseline ? Math.max(0, totalWithdrawX - totalBaselineX) : 0;
-  const feesY = hasBaseline ? Math.max(0, totalWithdrawY - totalBaselineY) : 0;
+  const feesX = hasBaseline && totalWithdrawX > totalBaselineX ? totalWithdrawX - totalBaselineX : 0n;
+  const feesY = hasBaseline && totalWithdrawY > totalBaselineY ? totalWithdrawY - totalBaselineY : 0n;
 
   // Principal = total - fees (what we re-deploy)
   const principalX = totalWithdrawX - feesX;
@@ -368,7 +361,8 @@ function planRecenter(
   let profitable = true;
   let rejectionReason: string | null = null;
 
-  if (totalWithdrawX < MIN_POSITION_SATS && totalWithdrawY < MIN_POSITION_SATS) {
+  const minSats = BigInt(MIN_POSITION_SATS);
+  if (totalWithdrawX < minSats && totalWithdrawY < minSats) {
     profitable = false;
     rejectionReason = `position too small: ${totalWithdrawX} X + ${totalWithdrawY} Y (min ${MIN_POSITION_SATS})`;
   }
@@ -380,23 +374,30 @@ function planRecenter(
 
   // Build deposit bins centered on active bin
   const depositBins: { bin_id: number; amount_x: string; amount_y: string }[] = [];
-  const binCount = newRange * 2 + 1;
-  const perBinX = Math.floor(principalX / binCount);
-  const perBinY = Math.floor(principalY / binCount);
+  const binCount = BigInt(newRange * 2 + 1);
+  const perBinX = principalX / binCount;
+  const perBinY = principalY / binCount;
 
   for (let offset = -newRange; offset <= newRange; offset++) {
     const binId = activeBin + offset;
-    // Below active bin: quote side (Y). At/above: base side (X)
+    // Below active bin: quote side (Y). Active bin: both sides. Above: base side (X)
     if (offset < 0) {
       depositBins.push({
         bin_id: binId,
         amount_x: "0",
-        amount_y: String(perBinY > 0 ? perBinY : perBinX),
+        amount_y: String(perBinY > 0n ? perBinY : perBinX),
+      });
+    } else if (offset === 0) {
+      // Active bin holds both X and Y proportionally
+      depositBins.push({
+        bin_id: binId,
+        amount_x: String(perBinX > 0n ? perBinX : 0n),
+        amount_y: String(perBinY > 0n ? perBinY : 0n),
       });
     } else {
       depositBins.push({
         bin_id: binId,
-        amount_x: String(perBinX > 0 ? perBinX : perBinY),
+        amount_x: String(perBinX > 0n ? perBinX : perBinY),
         amount_y: "0",
       });
     }
@@ -428,12 +429,12 @@ function planRecenter(
     profitable,
     withdrawBins,
     depositBins,
-    totalWithdrawX,
-    totalWithdrawY,
-    feesHarvestedX: feesX,
-    feesHarvestedY: feesY,
-    principalRedeployX: principalX,
-    principalRedeployY: principalY,
+    totalWithdrawX: Number(totalWithdrawX),
+    totalWithdrawY: Number(totalWithdrawY),
+    feesHarvestedX: Number(feesX),
+    feesHarvestedY: Number(feesY),
+    principalRedeployX: Number(principalX),
+    principalRedeployY: Number(principalY),
     gasEstimateSTX: gasEstimate,
     newCenter: activeBin,
     oldCenter: health.positionCenter,
@@ -654,8 +655,7 @@ program
       return;
     }
 
-    const poolContract = POOL_CONTRACTS[opts.pool] || null;
-    const plan = planRecenter(health, significantBins, poolState, poolContract);
+    const plan = planRecenter(health, significantBins, poolState);
 
     output("success", "plan", {
       poolId: opts.pool,
@@ -738,8 +738,7 @@ program
       return;
     }
 
-    const poolContract = POOL_CONTRACTS[opts.pool] || null;
-    const plan = planRecenter(health, significantBins, poolState, poolContract);
+    const plan = planRecenter(health, significantBins, poolState);
 
     if (!plan.profitable) {
       output("blocked", "recenter", { plan }, plan.rejectionReason);
@@ -922,8 +921,7 @@ program
           continue;
         }
 
-        const poolContract = POOL_CONTRACTS[poolMeta.pool_id] || null;
-        const plan = planRecenter(health, significantBins, poolState, poolContract);
+        const plan = planRecenter(health, significantBins, poolState);
 
         if (plan.profitable) {
           // Record event (pending until MCP execution confirms)
