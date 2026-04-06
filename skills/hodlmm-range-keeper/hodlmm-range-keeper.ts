@@ -82,6 +82,7 @@ interface PositionBaseline {
 interface RecenterEvent {
   poolId: string;
   timestamp: string;
+  status?: "pending_verification" | "confirmed" | "failed";
   oldCenter: number;
   newCenter: number;
   drift: number;
@@ -162,8 +163,8 @@ async function fetchUserPositions(poolId: string, address: string): Promise<BinD
   if (!data?.bins) return [];
   return data.bins.map((b: any) => ({
     bin_id: parseInt(b.bin_id),
-    reserve_x: String(Math.floor(b.userLiquidity || 0)),
-    reserve_y: "0",
+    reserve_x: String(b.reserve_x || Math.floor(b.userLiquidity || 0)),
+    reserve_y: String(b.reserve_y || "0"),
     userLiquidity: b.userLiquidity || 0,
     price: b.price || 0,
   }));
@@ -233,26 +234,26 @@ function analyzePosition(
   ).length;
   const rangeEfficiency = binIds.length > 0 ? (inRange / binIds.length) * 100 : 0;
 
-  // Total position value
-  let totalValueX = 0;
-  let totalValueY = 0;
+  // Total position value (BigInt for atomic-unit precision)
+  let totalValueX = 0n;
+  let totalValueY = 0n;
   for (const bin of userBins) {
-    totalValueX += parseInt(bin.reserve_x || "0");
-    totalValueY += parseInt(bin.reserve_y || "0");
+    totalValueX += BigInt(bin.reserve_x || "0");
+    totalValueY += BigInt(bin.reserve_y || "0");
   }
 
   // Fee estimation against baselines
-  let estimatedFeesX = 0;
-  let estimatedFeesY = 0;
+  let estimatedFeesX = 0n;
+  let estimatedFeesY = 0n;
   for (const bin of userBins) {
     const baseline = poolState.baselines[bin.bin_id];
     if (baseline) {
-      const currentX = parseInt(bin.reserve_x || "0");
-      const currentY = parseInt(bin.reserve_y || "0");
-      const baseX = parseInt(baseline.depositX || "0");
-      const baseY = parseInt(baseline.depositY || "0");
-      estimatedFeesX += Math.max(0, currentX - baseX);
-      estimatedFeesY += Math.max(0, currentY - baseY);
+      const currentX = BigInt(bin.reserve_x || "0");
+      const currentY = BigInt(bin.reserve_y || "0");
+      const baseX = BigInt(baseline.depositX || "0");
+      const baseY = BigInt(baseline.depositY || "0");
+      if (currentX > baseX) estimatedFeesX += currentX - baseX;
+      if (currentY > baseY) estimatedFeesY += currentY - baseY;
     }
   }
 
@@ -289,10 +290,10 @@ function analyzePosition(
     drift,
     driftAbs: Math.abs(drift),
     rangeEfficiency: Math.round(rangeEfficiency * 100) / 100,
-    totalValueX,
-    totalValueY,
-    estimatedFeesX,
-    estimatedFeesY,
+    totalValueX: Number(totalValueX),
+    totalValueY: Number(totalValueY),
+    estimatedFeesX: Number(estimatedFeesX),
+    estimatedFeesY: Number(estimatedFeesY),
     needsRecenter,
     reason,
     cooldownRemaining,
@@ -751,10 +752,11 @@ program
     log(`Drift: ${plan.drift} bins, withdrawing ${plan.withdrawBins.length} bins`);
     log(`Re-depositing into ${plan.depositBins.length} bins centered on active bin ${plan.newCenter}`);
 
-    // Record the recenter event
+    // Record the recenter event (pending until MCP execution confirms)
     const event: RecenterEvent = {
       poolId: opts.pool,
       timestamp: new Date().toISOString(),
+      status: "pending_verification",
       oldCenter: plan.oldCenter,
       newCenter: plan.newCenter,
       drift: plan.drift,
@@ -924,10 +926,11 @@ program
         const plan = planRecenter(health, significantBins, poolState, poolContract);
 
         if (plan.profitable) {
-          // Record event
+          // Record event (pending until MCP execution confirms)
           const event: RecenterEvent = {
             poolId: poolMeta.pool_id,
             timestamp: new Date().toISOString(),
+            status: "pending_verification",
             oldCenter: plan.oldCenter,
             newCenter: plan.newCenter,
             drift: plan.drift,

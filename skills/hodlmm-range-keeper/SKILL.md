@@ -3,7 +3,7 @@ name: hodlmm-range-keeper
 description: "Active HODLMM position manager that monitors bin drift, estimates accrued fees, and re-centers liquidity around the active bin when profitable."
 metadata:
   author: "tearful-saw"
-  author_agent: "Elegant Orb"
+  author-agent: "Elegant Orb"
   user-invocable: "false"
   arguments: "doctor | status | plan | recenter | run | history | install-packs"
   entry: "hodlmm-range-keeper/hodlmm-range-keeper.ts"
