@@ -157,17 +157,11 @@ async function fetchUserPositions(poolId: string, address: string): Promise<BinD
   if (!data?.bins) return [];
   return data.bins.map((b: any) => ({
     bin_id: parseInt(b.bin_id),
-    reserve_x: String(b.reserve_x || Math.floor(b.userLiquidity || 0)),
-    reserve_y: String(b.reserve_y || "0"),
+    reserve_x: String(b.reserve_x !== undefined && b.reserve_x !== null ? b.reserve_x : Math.floor(b.userLiquidity || 0)),
+    reserve_y: String(b.reserve_y !== undefined && b.reserve_y !== null ? b.reserve_y : "0"),
     userLiquidity: b.userLiquidity || 0,
     price: b.price || 0,
   }));
-}
-
-async function fetchPoolAppStats(): Promise<any[]> {
-  const data = await fetchJson(`${HODLMM_APP_API}/api/app/v1/pools`);
-  if (!data) return [];
-  return data.data || data.pools || [];
 }
 
 async function fetchStxBalance(address: string): Promise<number> {
@@ -405,11 +399,6 @@ function planRecenter(
 
   // Build MCP command strings
   const poolId = health.poolId;
-  const binIdsWithdraw = withdrawBins.map((b) => b.bin_id).join(",");
-  const amountsWithdraw = withdrawBins
-    .map((b) => `${b.amount_x}:${b.amount_y}`)
-    .join(",");
-
   const mcpWithdrawCmd = [
     `bitflow_hodlmm_remove_liquidity`,
     `pool_id: "${poolId}"`,
@@ -563,14 +552,22 @@ program
     const pools = await fetchAllPools();
     const poolIds = opts.pool ? [opts.pool] : pools.map((p) => p.pool_id);
 
+    // Fetch all positions in parallel (like doctor does)
+    const positionResults = await Promise.allSettled(
+      poolIds.map(async (poolId) => {
+        const poolMeta = pools.find((p) => p.pool_id === poolId);
+        if (!poolMeta) return null;
+        const userBins = await fetchUserPositions(poolId, stxAddress!);
+        if (userBins.length === 0) return null;
+        return { poolId, poolMeta, userBins };
+      })
+    );
+
     const results: PositionHealth[] = [];
 
-    for (const poolId of poolIds) {
-      const poolMeta = pools.find((p) => p.pool_id === poolId);
-      if (!poolMeta) continue;
-
-      const userBins = await fetchUserPositions(poolId, stxAddress);
-      if (userBins.length === 0) continue;
+    for (const result of positionResults) {
+      if (result.status !== "fulfilled" || !result.value) continue;
+      const { poolId, poolMeta, userBins } = result.value;
 
       // Filter dust
       const significantBins = userBins.filter((b) => {
@@ -865,6 +862,7 @@ program
 
     const results: any[] = [];
     let recentersExecuted = 0;
+    let remainingStxBalance = stxBalance;
 
     for (const poolMeta of pools) {
       if (recentersExecuted >= MAX_RECENTER_PER_CYCLE) break;
@@ -911,11 +909,11 @@ program
           continue;
         }
 
-        if (stxBalance < DEFAULT_GAS_ESTIMATE_STX) {
+        if (remainingStxBalance < DEFAULT_GAS_ESTIMATE_STX) {
           results.push({
             poolId: poolMeta.pool_id,
             action: "insufficient_gas",
-            stxBalance,
+            stxBalance: remainingStxBalance,
             health,
           });
           continue;
@@ -978,6 +976,7 @@ program
             health,
           });
           recentersExecuted++;
+          remainingStxBalance -= DEFAULT_GAS_ESTIMATE_STX;
         } else {
           results.push({
             poolId: poolMeta.pool_id,
