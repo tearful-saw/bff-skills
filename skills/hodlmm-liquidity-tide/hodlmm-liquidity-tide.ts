@@ -22,7 +22,11 @@ import { homedir } from "os";
 const HODLMM_QUOTES_API = "https://bff.bitflowapis.finance/api/quotes/v1";
 const HODLMM_APP_API = "https://bff.bitflowapis.finance/api/app/v1";
 
-const STATE_PATH = join(homedir(), ".hodlmm-liquidity-tide.json");
+// State file path. AIBTC framework can override via HODLMM_LIQUIDITY_TIDE_STATE
+// to namespace per-agent when multiple agents share the same home directory.
+const STATE_PATH =
+  process.env.HODLMM_LIQUIDITY_TIDE_STATE ||
+  join(homedir(), ".hodlmm-liquidity-tide.json");
 const MAX_SNAPSHOTS = 2016; // 7 days at 5-min intervals
 const MIN_SNAPSHOTS_FOR_SIGNAL = 2;
 
@@ -39,12 +43,37 @@ const FALLING_THRESHOLD = -0.5; // -0.5% = distribution
 const HIGH_MOMENTUM = 1.5; // momentum multiplier for high confidence
 
 // ─── Output ──────────────────────────────────────────────────────────────
-function output(status: string, action: string, data: any, error: any = null) {
+type OutputStatus = "success" | "error" | "blocked";
+
+function output(status: OutputStatus, action: string, data: unknown, error: string | null = null): void {
   console.log(JSON.stringify({ status, action, data, error }));
 }
 
-function log(...args: any[]) {
+function log(...args: unknown[]): void {
   console.error("[liquidity-tide]", ...args);
+}
+
+// Safe BigInt parse — tolerates undefined/empty/scientific-notation inputs.
+function safeBigInt(v: string | number | null | undefined): bigint {
+  if (v === null || v === undefined || v === "") return 0n;
+  try {
+    // BigInt() rejects decimals; strip any trailing fractional part defensively.
+    const s = typeof v === "number" ? String(Math.trunc(v)) : String(v).split(".")[0];
+    return BigInt(s);
+  } catch {
+    return 0n;
+  }
+}
+
+// Convert accumulated BigInt back to Number for downstream ratio/% math.
+// Logs and clamps if the value would lose precision past MAX_SAFE_INTEGER.
+const MAX_SAFE_BIG = BigInt(Number.MAX_SAFE_INTEGER);
+function bigIntToNumber(v: bigint, label: string): number {
+  if (v > MAX_SAFE_BIG) {
+    log(`overflow: ${label} exceeds MAX_SAFE_INTEGER (${v.toString()}); clamping for ratio math`);
+    return Number.MAX_SAFE_INTEGER;
+  }
+  return Number(v);
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────
@@ -89,12 +118,24 @@ function saveState(state: State): void {
 }
 
 // ─── API ─────────────────────────────────────────────────────────────────
-async function fetchJson(url: string): Promise<any> {
+async function fetchJson<T = unknown>(url: string): Promise<T | null> {
+  let r: Response;
   try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-    if (!r.ok) return null;
-    return r.json();
-  } catch {
+    r = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    log(`fetch failed (network/timeout) ${url}: ${msg}`);
+    return null;
+  }
+  if (!r.ok) {
+    log(`fetch failed (http ${r.status}) ${url}`);
+    return null;
+  }
+  try {
+    return (await r.json()) as T;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    log(`fetch failed (json parse) ${url}: ${msg}`);
     return null;
   }
 }
@@ -108,7 +149,7 @@ interface PoolMeta {
 }
 
 async function fetchPools(): Promise<PoolMeta[]> {
-  const data = await fetchJson(`${HODLMM_QUOTES_API}/pools`);
+  const data = await fetchJson<{ pools?: PoolMeta[] }>(`${HODLMM_QUOTES_API}/pools`);
   return data?.pools || [];
 }
 
@@ -120,7 +161,7 @@ interface BinRaw {
 }
 
 async function fetchPoolBins(poolId: string): Promise<{ activeBin: number; bins: BinRaw[] } | null> {
-  const data = await fetchJson(`${HODLMM_QUOTES_API}/bins/${poolId}`);
+  const data = await fetchJson<{ active_bin_id?: number; bins?: BinRaw[] }>(`${HODLMM_QUOTES_API}/bins/${poolId}`);
   if (!data?.bins) return null;
   return { activeBin: data.active_bin_id ?? 0, bins: data.bins };
 }
@@ -132,12 +173,25 @@ interface AppPoolStats {
   feesUsd1d: number;
 }
 
+interface AppPoolRaw {
+  poolId?: string;
+  pool_id?: string;
+  tvlUsd?: number;
+  volumeUsd1d?: number;
+  feesUsd1d?: number;
+}
+
+interface AppPoolsResponse {
+  data?: AppPoolRaw[];
+  pools?: AppPoolRaw[];
+}
+
 async function fetchAppStats(): Promise<AppPoolStats[]> {
-  const data = await fetchJson(`${HODLMM_APP_API}/pools`);
+  const data = await fetchJson<AppPoolsResponse | AppPoolRaw[]>(`${HODLMM_APP_API}/pools`);
   if (!data) return [];
-  const pools = Array.isArray(data) ? data : data.data || data.pools || [];
-  return pools.map((p: any) => ({
-    poolId: p.poolId || p.pool_id,
+  const pools: AppPoolRaw[] = Array.isArray(data) ? data : data.data || data.pools || [];
+  return pools.map((p) => ({
+    poolId: p.poolId || p.pool_id || "",
     tvlUsd: p.tvlUsd || 0,
     volumeUsd1d: p.volumeUsd1d || 0,
     feesUsd1d: p.feesUsd1d || 0,
@@ -166,28 +220,31 @@ async function buildSnapshot(): Promise<Snapshot | null> {
     if (result.status !== "fulfilled" || !result.value) continue;
     const { poolId, activeBin, bins } = result.value;
 
-    let totalReserveX = 0;
-    let totalReserveY = 0;
-    let totalLiquidity = 0;
+    // Use BigInt for bin-level accumulation to preserve atomic-unit precision.
+    // Bin reserves are string-encoded u128 values in the HODLMM contract; summing
+    // them with parseInt silently truncates once totals exceed Number.MAX_SAFE_INTEGER.
+    let totalReserveXBig = 0n;
+    let totalReserveYBig = 0n;
+    let totalLiquidityBig = 0n;
     let activeBinCount = 0;
 
     for (const bin of bins) {
-      const rx = parseInt(bin.reserve_x || "0");
-      const ry = parseInt(bin.reserve_y || "0");
-      const liq = parseInt(bin.liquidity || "0");
-      totalReserveX += rx;
-      totalReserveY += ry;
-      totalLiquidity += liq;
-      if (liq > 0) activeBinCount++;
+      const rx = safeBigInt(bin.reserve_x);
+      const ry = safeBigInt(bin.reserve_y);
+      const liq = safeBigInt(bin.liquidity);
+      totalReserveXBig += rx;
+      totalReserveYBig += ry;
+      totalLiquidityBig += liq;
+      if (liq > 0n) activeBinCount++;
     }
 
     const stats = statsMap.get(poolId);
 
     poolSnapshots.push({
       poolId,
-      totalReserveX,
-      totalReserveY,
-      totalLiquidity,
+      totalReserveX: bigIntToNumber(totalReserveXBig, `${poolId}.totalReserveX`),
+      totalReserveY: bigIntToNumber(totalReserveYBig, `${poolId}.totalReserveY`),
+      totalLiquidity: bigIntToNumber(totalLiquidityBig, `${poolId}.totalLiquidity`),
       activeBin,
       activeBinCount,
       tvlUsd: stats?.tvlUsd || 0,
@@ -223,6 +280,47 @@ interface TideSignal {
   activeBin: number;
   activeBinCount: number;
   snapshotsUsed: number;
+}
+
+interface DoctorChecks {
+  hodlmmApi: boolean;
+  appApi: boolean;
+  pools: Array<{ poolId: string; activeBin: number; binStep: number }>;
+  snapshotState: {
+    fileExists: boolean;
+    totalSnapshots: number;
+    oldestSnapshot: string | null;
+    newestSnapshot: string | null;
+    poolsCovered: number;
+    timeSpanMinutes?: number;
+    avgIntervalMinutes?: number | null;
+  };
+  commands: string[];
+  readyForAnalysis?: boolean;
+  note?: string;
+}
+
+interface SnapshotDelta {
+  poolId: string;
+  delta?: string;
+  liquidityChangePct?: string | null;
+  tvlChangePct?: string | null;
+  direction?: "INFLOW" | "OUTFLOW" | "STABLE";
+}
+
+interface TimelinePoolEntry {
+  poolId: string;
+  totalReserveX: number;
+  totalReserveY: number;
+  tvlUsd: number;
+  activeBinCount: number;
+  liquidityChangePct?: string | null;
+  tvlChangePct?: string | null;
+}
+
+interface TimelineEntry {
+  timestamp: string;
+  pools: TimelinePoolEntry[];
 }
 
 function pctChange(current: number, previous: number): number {
@@ -396,7 +494,7 @@ program
   .command("doctor")
   .description("Check API access, pool availability, and snapshot state")
   .action(async () => {
-    const checks: any = {
+    const checks: DoctorChecks = {
       hodlmmApi: false,
       appApi: false,
       pools: [],
@@ -484,10 +582,10 @@ program
     }));
 
     // Quick delta from previous snapshot if available
-    let deltas: any[] | null = null;
+    let deltas: SnapshotDelta[] | null = null;
     if (state.snapshots.length >= 2) {
       const prev = state.snapshots[state.snapshots.length - 2];
-      deltas = snapshot.pools.map((current) => {
+      deltas = snapshot.pools.map((current): SnapshotDelta => {
         const old = prev.pools.find((p) => p.poolId === current.poolId);
         if (!old) return { poolId: current.poolId, delta: "new pool" };
         // Use LP share change as primary flow indicator (swap-independent)
@@ -609,11 +707,11 @@ program
     const limit = parseInt(opts.limit) || 20;
     const recentSnapshots = state.snapshots.slice(-limit);
 
-    const timelineEntries: any[] = [];
+    const timelineEntries: TimelineEntry[] = [];
 
     for (let i = 0; i < recentSnapshots.length; i++) {
       const snap = recentSnapshots[i];
-      const entry: any = {
+      const entry: TimelineEntry = {
         timestamp: snap.timestamp,
         pools: [],
       };
@@ -621,7 +719,7 @@ program
       for (const pool of snap.pools) {
         if (opts.pool && pool.poolId !== opts.pool) continue;
 
-        const poolEntry: any = {
+        const poolEntry: TimelinePoolEntry = {
           poolId: pool.poolId,
           totalReserveX: pool.totalReserveX,
           totalReserveY: pool.totalReserveY,
@@ -670,9 +768,10 @@ program.configureOutput({
 
 try {
   await program.parseAsync();
-} catch (e: any) {
-  if (e.code === "commander.helpDisplayed" || e.code === "commander.version") process.exit(0);
-  const msg = e.message?.replace(/^error: /, "") || String(e);
+} catch (e: unknown) {
+  const err = e as { code?: string; message?: string };
+  if (err.code === "commander.helpDisplayed" || err.code === "commander.version") process.exit(0);
+  const msg = err.message?.replace(/^error: /, "") || String(e);
   output("error", "cli", null, msg);
   process.exit(1);
 }

@@ -90,9 +90,35 @@ All outputs are JSON to stdout.
 { "status": "blocked", "action": "run", "data": { "hint": "Need at least 2 snapshots. Run `snapshot` first." }, "error": "Insufficient data" }
 ```
 
+## Composability — pairing with action skills
+
+`hodlmm-liquidity-tide` is a timing layer, not an execution layer. It is designed to feed action skills that actually move capital. Two concrete pairings:
+
+**Pair with `hodlmm-range-keeper` — timing-aware re-centers.**
+`hodlmm-range-keeper` detects when the active bin drifts away from an LP position and re-centers by withdrawing and re-depositing. Feeding it the tide signal avoids re-centering into a pool that is actively bleeding LPs:
+- `tide = RISING` on the drifted pool → proceed with re-center; entering a strengthening flow
+- `tide = FALLING` → defer re-center; the liquidity base is shrinking and re-depositing becomes distribution fuel
+- `tide = SLACK` → normal re-center logic applies
+
+**Pair with a `hodlmm-pulse` fee-velocity signal — conviction filter.**
+Fee velocity measures how fast a pool is generating fees per unit of TVL. Combined with the tide direction, the composite becomes a conviction filter that distinguishes real opportunities from exit-liquidity traps:
+- fee spike + `tide = RISING` → high conviction entry (real capital flowing in and real fees being earned)
+- fee spike + `tide = FALLING` → trap (fees are high because LPs are leaving, not because flow is healthy)
+- fee spike + `tide = SLACK` → observe only, await directional confirmation
+
+**Pair with any DCA / deploy skill — entry gating.**
+A DCA skill that routes sBTC into a HODLMM position can consult the tide before committing:
+- `signal = ENTER` (RISING + high confidence) → full allocation
+- `signal = WAIT` (RISING + medium/low confidence) → smaller tranche, re-check next cycle
+- `signal = CAUTION` or `EXIT` → hold dry powder; the pool is in distribution
+
+**Why the signal is swap-independent.**
+The primary metric is LP share supply (`totalLiquidity`), which only changes when liquidity is added or removed. Swaps shift reserves between token X and Y but leave the share supply unchanged. This means the tide classification is immune to trading noise and reflects only genuine capital flow — exactly the input an action skill needs to avoid being fooled by high-volume churn.
+
 ## Known constraints
 - Mainnet only
 - Requires periodic snapshots (recommended: every 5–15 min via cron or agent scheduler)
 - First meaningful tide signal requires ~1 hour of snapshots (minimum 4 data points)
 - Retains up to 7 days of snapshots (older ones are pruned automatically)
-- The primary metric is LP share supply (`totalLiquidity`), which only changes when LPs add or remove liquidity — swaps shift reserves between token X and Y but leave LP shares unchanged. Reserve and TVL deltas are reported as secondary context but never drive the tide classification
+- State file path defaults to `~/.hodlmm-liquidity-tide.json`; override via `HODLMM_LIQUIDITY_TIDE_STATE` env var for per-agent namespacing when multiple agents share a home directory
+- Bin-level reserves are accumulated in `BigInt` to preserve atomic-unit precision; totals are converted to `Number` only at the final storage step, with an overflow guard that clamps and logs if a pool ever exceeds `Number.MAX_SAFE_INTEGER`
