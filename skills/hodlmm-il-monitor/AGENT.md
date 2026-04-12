@@ -1,6 +1,6 @@
 ---
-name: hodlmm-il-tracker-agent
-skill: hodlmm-il-tracker
+name: hodlmm-il-monitor-agent
+skill: hodlmm-il-monitor
 description: "Agent behavior rules for the HODLMM IL Tracker — impermanent loss monitoring skill."
 ---
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * hodlmm-il-tracker — Impermanent Loss tracker for HODLMM positions
+ * hodlmm-il-monitor — Impermanent Loss monitor for HODLMM positions
  *
  * Tracks real-time impermanent loss on live concentrated-liquidity positions
  * by comparing current LP value to a HODL-only baseline recorded at entry.
@@ -23,16 +23,16 @@ const HODLMM_API = "https://bff.bitflowapis.finance/api/quotes/v1";
 const HODLMM_APP_API = "https://bff.bitflowapis.finance";
 const HIRO_API = "https://api.hiro.so";
 
-const STATE_PATH = join(homedir(), ".hodlmm-il-tracker.json");
+const STATE_PATH = join(homedir(), ".hodlmm-il-monitor.json");
 const MAX_HISTORY = 1000; // history entries cap
 
 // ─── Output ──────────────────────────────────────────────────────────────
-function output(status: string, action: string, data: any, error: any = null) {
+function output(status: string, action: string, data: unknown, error: unknown = null) {
   console.log(JSON.stringify({ status, action, data, error }));
 }
 
-function log(...args: any[]) {
-  console.error("[il-tracker]", ...args);
+function log(...args: unknown[]) {
+  console.error("[il-monitor]", ...args);
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────
@@ -144,9 +144,13 @@ async function fetchUserPositions(poolId: string, address: string): Promise<BinD
     `${HODLMM_APP_API}/api/app/v1/users/${address}/positions/${poolId}/bins`
   );
   if (!data?.bins) return [];
+  // NOTE: reserve_x/reserve_y are raw token amounts; userLiquidity is a liquidity unit
+  // with different scale and semantics. When the API omits reserve_x/y, we fall back
+  // to "0" rather than substituting userLiquidity, which would silently produce
+  // wrong IL and fee calculations.
   return data.bins.map((b: any) => ({
     bin_id: parseInt(b.bin_id),
-    reserve_x: String(b.reserve_x !== undefined && b.reserve_x !== null ? b.reserve_x : Math.floor(b.userLiquidity || 0)),
+    reserve_x: String(b.reserve_x !== undefined && b.reserve_x !== null ? b.reserve_x : "0"),
     reserve_y: String(b.reserve_y !== undefined && b.reserve_y !== null ? b.reserve_y : "0"),
     userLiquidity: b.userLiquidity || 0,
     price: b.price || 0,
@@ -156,6 +160,22 @@ async function fetchUserPositions(poolId: string, address: string): Promise<BinD
 async function fetchStxBalance(address: string): Promise<number> {
   const data = await fetchJson(`${HIRO_API}/extended/v1/address/${address}/stx`);
   return data ? parseInt(data.balance || "0") / 1e6 : 0;
+}
+
+// Resolve STX_ADDRESS and reject malformed values before any API call,
+// so users get a clear error instead of a confusing Hiro/HODLMM 400.
+function resolveStxAddress(): { address: string } | { error: string } {
+  const addr = process.env.STX_ADDRESS;
+  if (!addr) return { error: "STX_ADDRESS env var required." };
+  // Stacks mainnet addresses: "SP" + Crockford base32 (no I/L/O/U).
+  // Length varies (leading-zero hash160 values collapse), so use a permissive
+  // range — the goal is catching obvious garbage, not validating checksums.
+  if (!/^SP[0-9A-HJKMNP-Z]{27,41}$/.test(addr)) {
+    return {
+      error: `Invalid STX_ADDRESS format: ${addr}. Expected Stacks mainnet address (SP... , base32 Crockford).`,
+    };
+  }
+  return { address: addr };
 }
 
 // ─── Price helpers ───────────────────────────────────────────────────────
@@ -300,8 +320,8 @@ async function takeSnapshot(
 // ─── CLI ─────────────────────────────────────────────────────────────────
 const program = new Command();
 program
-  .name("hodlmm-il-tracker")
-  .description("Impermanent loss tracker for HODLMM concentrated-liquidity positions");
+  .name("hodlmm-il-monitor")
+  .description("Impermanent loss monitor for HODLMM concentrated-liquidity positions");
 
 // ── doctor ──────────────────────────────────────────────────────────────
 program
@@ -382,11 +402,12 @@ program
   .option("--pool <id>", "Pool to snapshot (default: all with positions)")
   .option("--force", "Overwrite existing snapshot")
   .action(async (opts) => {
-    const stxAddress = process.env.STX_ADDRESS;
-    if (!stxAddress) {
-      output("blocked", "snapshot", null, "STX_ADDRESS env var required.");
+    const resolved = resolveStxAddress();
+    if ("error" in resolved) {
+      output("blocked", "snapshot", null, resolved.error);
       return;
     }
+    const stxAddress = resolved.address;
 
     const state = loadState();
     const pools = await fetchAllPools();
@@ -395,7 +416,7 @@ program
 
     const snapResults = await Promise.allSettled(
       poolIds.map(async (poolId) => {
-        return { poolId, snapshot: await takeSnapshot(poolId, stxAddress!, pools) };
+        return { poolId, snapshot: await takeSnapshot(poolId, stxAddress, pools) };
       })
     );
 
@@ -441,11 +462,12 @@ program
   .description("Show current IL for all tracked positions")
   .option("--pool <id>", "Specific pool (default: all tracked)")
   .action(async (opts) => {
-    const stxAddress = process.env.STX_ADDRESS;
-    if (!stxAddress) {
-      output("blocked", "status", null, "STX_ADDRESS env var required.");
+    const resolved = resolveStxAddress();
+    if ("error" in resolved) {
+      output("blocked", "status", null, resolved.error);
       return;
     }
+    const stxAddress = resolved.address;
 
     const state = loadState();
     const pools = await fetchAllPools();
@@ -471,7 +493,7 @@ program
         if (!poolMeta) return null;
 
         const [userBins, price] = await Promise.all([
-          fetchUserPositions(poolId, stxAddress!),
+          fetchUserPositions(poolId, stxAddress),
           getActiveBinPrice(poolId),
         ]);
 
@@ -524,11 +546,12 @@ program
   .command("run")
   .description("Full cycle: snapshot new positions, report IL, record history")
   .action(async () => {
-    const stxAddress = process.env.STX_ADDRESS;
-    if (!stxAddress) {
-      output("blocked", "run", null, "STX_ADDRESS env var required.");
+    const resolved = resolveStxAddress();
+    if ("error" in resolved) {
+      output("blocked", "run", null, resolved.error);
       return;
     }
+    const stxAddress = resolved.address;
 
     const state = loadState();
     const pools = await fetchAllPools();
@@ -538,7 +561,7 @@ program
     // 1. Discover positions across all pools in parallel
     const posResults = await Promise.allSettled(
       pools.map(async (pool) => {
-        const bins = await fetchUserPositions(pool.pool_id, stxAddress!);
+        const bins = await fetchUserPositions(pool.pool_id, stxAddress);
         if (bins.length === 0) return null;
         return { poolId: pool.pool_id, bins };
       })
@@ -641,18 +664,17 @@ program
   .option("--limit <n>", "Number of entries", "30")
   .action(async (opts) => {
     const state = loadState();
-    let entries = state.history;
+    const limit = parseInt(opts.limit) || 30;
 
+    let entries = state.history;
     if (opts.pool) {
       entries = entries.filter((e) => e.poolId === opts.pool);
     }
-
-    const limit = parseInt(opts.limit) || 30;
     entries = entries.slice(-limit);
 
-    // Compute trend if enough data
+    // Compute trend if enough data (meaningful only in single-pool view)
     let trend: any = null;
-    if (entries.length >= 2) {
+    if (opts.pool && entries.length >= 2) {
       const first = entries[0];
       const last = entries[entries.length - 1];
       trend = {
@@ -665,11 +687,16 @@ program
       };
     }
 
+    // In aggregate view, apply --limit per-pool from full history so each
+    // pool's latest reading is always represented (rather than slicing the
+    // global stream and dropping pools that happen to fall outside the window).
     output("success", "history", {
       totalEntries: state.history.length,
       trackedPools: Object.keys(state.entries).length,
       entries: opts.pool ? entries : Object.keys(state.entries).map((poolId) => {
-        const poolEntries = entries.filter((e) => e.poolId === poolId);
+        const poolEntries = state.history
+          .filter((e) => e.poolId === poolId)
+          .slice(-limit);
         const latest = poolEntries[poolEntries.length - 1];
         return {
           poolId,

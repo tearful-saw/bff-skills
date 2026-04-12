@@ -1,17 +1,17 @@
 ---
-name: hodlmm-il-tracker
+name: hodlmm-il-monitor
 description: "Real-time impermanent loss tracker for HODLMM concentrated-liquidity positions — compares live LP value to a HODL-only baseline."
 metadata:
   author: "tearful-saw"
   author-agent: "Elegant Orb"
   user-invocable: "false"
   arguments: "doctor | snapshot | status | run | history | install-packs"
-  entry: "hodlmm-il-tracker/hodlmm-il-tracker.ts"
+  entry: "hodlmm-il-monitor/hodlmm-il-monitor.ts"
   requires: "wallet, settings"
   tags: "defi, read-only, mainnet-only, l2"
 ---
 
-# HODLMM IL Tracker
+# HODLMM IL Monitor
 
 ## What it does
 Tracks impermanent loss on live HODLMM concentrated-liquidity positions by recording an entry snapshot (token amounts + price at deposit) and continuously comparing it to the current LP state. Reports IL as a percentage, estimates fee income, and computes net P&L (IL + fees vs HODL). Classifies positions by severity (healthy / mild / severe) and emits actionable alerts when IL exceeds thresholds.
@@ -21,7 +21,7 @@ Concentrated liquidity amplifies both fee income and impermanent loss. An LP pos
 
 ## Safety notes
 - **Read-only**: This skill never writes to chain or moves funds.
-- **State file**: Writes entry snapshots and history to `~/.hodlmm-il-tracker.json` locally.
+- **State file**: Writes entry snapshots and history to `~/.hodlmm-il-monitor.json` locally.
 - **No fund risk**: All operations are observational.
 - **Mainnet only**: HODLMM is not available on testnet.
 
@@ -30,41 +30,41 @@ Concentrated liquidity amplifies both fee income and impermanent loss. An LP pos
 ### doctor
 Check wallet, HODLMM API access, pool availability, existing positions, and tracker state. Safe to run anytime.
 ```bash
-STX_ADDRESS=SP... bun run hodlmm-il-tracker/hodlmm-il-tracker.ts doctor
+STX_ADDRESS=SP... bun run hodlmm-il-monitor/hodlmm-il-monitor.ts doctor
 ```
 
 ### snapshot
 Record current position as IL entry baseline. First snapshot per pool sets the reference point; subsequent snapshots require `--force` to overwrite.
 ```bash
-STX_ADDRESS=SP... bun run hodlmm-il-tracker/hodlmm-il-tracker.ts snapshot
-STX_ADDRESS=SP... bun run hodlmm-il-tracker/hodlmm-il-tracker.ts snapshot --pool dlmm_1
-STX_ADDRESS=SP... bun run hodlmm-il-tracker/hodlmm-il-tracker.ts snapshot --pool dlmm_1 --force
+STX_ADDRESS=SP... bun run hodlmm-il-monitor/hodlmm-il-monitor.ts snapshot
+STX_ADDRESS=SP... bun run hodlmm-il-monitor/hodlmm-il-monitor.ts snapshot --pool dlmm_1
+STX_ADDRESS=SP... bun run hodlmm-il-monitor/hodlmm-il-monitor.ts snapshot --pool dlmm_1 --force
 ```
 
 ### status
 Show current IL for all tracked positions. Fetches live prices, compares to entry snapshot, classifies severity, and recommends action.
 ```bash
-STX_ADDRESS=SP... bun run hodlmm-il-tracker/hodlmm-il-tracker.ts status
-STX_ADDRESS=SP... bun run hodlmm-il-tracker/hodlmm-il-tracker.ts status --pool dlmm_1
+STX_ADDRESS=SP... bun run hodlmm-il-monitor/hodlmm-il-monitor.ts status
+STX_ADDRESS=SP... bun run hodlmm-il-monitor/hodlmm-il-monitor.ts status --pool dlmm_1
 ```
 
 ### run
 Full autonomous cycle: discover positions across all pools, snapshot any new ones, calculate IL for existing, record history, and emit alerts. Designed for cron.
 ```bash
-STX_ADDRESS=SP... bun run hodlmm-il-tracker/hodlmm-il-tracker.ts run
+STX_ADDRESS=SP... bun run hodlmm-il-monitor/hodlmm-il-monitor.ts run
 ```
 
 ### history
 Show IL trend over time. Useful for spotting worsening IL patterns or confirming that fees are outpacing loss.
 ```bash
-bun run hodlmm-il-tracker/hodlmm-il-tracker.ts history
-bun run hodlmm-il-tracker/hodlmm-il-tracker.ts history --pool dlmm_1 --limit 50
+bun run hodlmm-il-monitor/hodlmm-il-monitor.ts history
+bun run hodlmm-il-monitor/hodlmm-il-monitor.ts history --pool dlmm_1 --limit 50
 ```
 
 ### install-packs
 No external packs required. Returns success immediately.
 ```bash
-bun run hodlmm-il-tracker/hodlmm-il-tracker.ts install-packs --pack all
+bun run hodlmm-il-monitor/hodlmm-il-monitor.ts install-packs --pack all
 ```
 
 ## Output contract
