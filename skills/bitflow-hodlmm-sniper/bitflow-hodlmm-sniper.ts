@@ -14,16 +14,28 @@
 
 import { BitflowSDK } from "@bitflowlabs/core-sdk";
 
+// Suppress unhandled rejections from Bitflow SDK's lazy/eager internal init when
+// the configured API host is unreachable. Same workaround pattern used by skills/dca
+// and bitflow-alex-spread-scanner.
+process.on("unhandledRejection", (reason: any) => {
+  console.error("[hodlmm-sniper][unhandled-rejection]", reason?.message || reason);
+});
+
 // --- Config -----------------------------------------------------------------
+const HIRO_API = process.env.READONLY_CALL_API_HOST || "https://api.hiro.so";
+
 const BITFLOW_CONFIG = {
-  BITFLOW_API_HOST: "https://bitflowsdk-api-test-7owjsmt8.uk.gateway.dev",
-  READONLY_CALL_API_HOST: "https://api.hiro.so",
+  BITFLOW_API_HOST: process.env.BITFLOW_API_HOST || "https://api.bitflowapis.finance",
+  BITFLOW_API_KEY: process.env.BITFLOW_API_KEY || "",
+  READONLY_CALL_API_HOST: HIRO_API,
   BITFLOW_PROVIDER_ADDRESS: "",
-  READONLY_CALL_API_KEY: "",
+  READONLY_CALL_API_KEY: process.env.HIRO_API_KEY || process.env.READONLY_CALL_API_KEY || "",
   KEEPER_API_HOST: "",
 };
 
-const HIRO_API = "https://api.hiro.so";
+const HIRO_API_KEY = process.env.HIRO_API_KEY || process.env.READONLY_CALL_API_KEY || "";
+const hiroHeaders: Record<string, string> = { Accept: "application/json" };
+if (HIRO_API_KEY) hiroHeaders["x-api-key"] = HIRO_API_KEY;
 
 // IL simulation price move scenarios (multipliers on token Y price)
 const IL_SCENARIOS = [0.5, 0.75, 0.9, 1.0, 1.1, 1.25, 1.5, 2.0];
@@ -137,7 +149,7 @@ async function readDataVar(contractId: string, varName: string): Promise<bigint>
   const [addr, name] = contractId.split(".");
   const url = `${HIRO_API}/v2/data_var/${addr}/${name}/${varName}?tip=latest`;
   const response = await withTimeout(
-    fetch(url, { headers: { Accept: "application/json" } }),
+    fetch(url, { headers: hiroHeaders }),
     10000,
     `data-var ${contractId}.${varName}`
   );
@@ -160,7 +172,7 @@ async function callReadOnly(
   const response = await withTimeout(
     fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...hiroHeaders, "Content-Type": "application/json" },
       body: JSON.stringify({ sender: addr, arguments: args }),
     }),
     10000,
@@ -418,7 +430,7 @@ function analyzePool(state: PoolState): PoolAnalysis {
 
 // --- Commands ---------------------------------------------------------------
 class HODLMMSniper {
-  sdk: any;
+  sdk: BitflowSDK;
 
   constructor() {
     this.sdk = new BitflowSDK(BITFLOW_CONFIG);
@@ -430,6 +442,7 @@ class HODLMMSniper {
     // Check Bitflow API
     let bitflowReachable = false;
     let tokenCount = 0;
+    let bitflowError: string | null = null;
     try {
       const tokens = await withTimeout(
         this.sdk.getAvailableTokens(),
@@ -439,57 +452,81 @@ class HODLMMSniper {
       bitflowReachable = true;
       tokenCount = tokens.length;
     } catch (e: any) {
-      log(`Bitflow API error: ${e.message}`);
+      bitflowError = e?.message || String(e);
+      log(`Bitflow API error: ${bitflowError}`);
     }
 
     await delay(API_DELAY_MS);
 
     // Check Hiro API
     let hiroReachable = false;
+    let hiroError: string | null = null;
     try {
       const r = await withTimeout(
-        fetch(`${HIRO_API}/extended/v1/info/network_block_times`),
+        fetch(`${HIRO_API}/extended/v1/info/network_block_times`, { headers: hiroHeaders }),
         10000,
         "Hiro API health"
       );
       hiroReachable = r.ok;
+      if (!r.ok) hiroError = `HTTP ${r.status}`;
     } catch (e: any) {
-      log(`Hiro API error: ${e.message}`);
+      hiroError = e?.message || String(e);
+      log(`Hiro API error: ${hiroError}`);
     }
 
     await delay(API_DELAY_MS);
 
-    // Test pool read on first pool
+    // Test pool read on first pool (only if Hiro is reachable)
     let poolReadable = false;
     let testPoolReserveX = "0";
-    try {
-      const rx = await readDataVar(POOL_REGISTRY[0].contract, "x-balance");
-      poolReadable = rx > 0n;
-      testPoolReserveX = rx.toString();
-    } catch (e: any) {
-      log(`Pool read test failed: ${e.message}`);
+    let poolError: string | null = null;
+    if (hiroReachable) {
+      try {
+        const rx = await readDataVar(POOL_REGISTRY[0].contract, "x-balance");
+        poolReadable = rx > 0n;
+        testPoolReserveX = rx.toString();
+      } catch (e: any) {
+        poolError = e?.message || String(e);
+        log(`Pool read test failed: ${poolError}`);
+      }
     }
 
-    if (!bitflowReachable && !hiroReachable) {
+    const allHealthy = bitflowReachable && hiroReachable && poolReadable;
+    const noneHealthy = !bitflowReachable && !hiroReachable;
+    const status = noneHealthy ? "error" : allHealthy ? "success" : "degraded";
+
+    if (noneHealthy) {
       output("error", "doctor", null, "Both Bitflow and Hiro APIs are unreachable");
       return;
     }
 
-    output("success", "doctor", {
-      bitflow: { reachable: bitflowReachable, tokenCount },
-      hiro: { reachable: hiroReachable },
+    const warnings: string[] = [];
+    if (!bitflowReachable) warnings.push(`bitflow_unreachable: ${bitflowError}`);
+    if (!hiroReachable) warnings.push(`hiro_unreachable: ${hiroError}`);
+    if (!poolReadable && hiroReachable) warnings.push(`pool_read_failed: ${poolError ?? "unknown"}`);
+    if (!HIRO_API_KEY) {
+      warnings.push(
+        `HIRO_API_KEY not set. With ${POOL_REGISTRY.length} pools and ~7 reads each, the public Hiro rate limit may degrade run scans.`
+      );
+    }
+
+    output(status, "doctor", {
+      bitflow: { reachable: bitflowReachable, tokenCount, apiHost: BITFLOW_CONFIG.BITFLOW_API_HOST, error: bitflowError },
+      hiro: { reachable: hiroReachable, apiHost: HIRO_API, apiKeyConfigured: Boolean(HIRO_API_KEY), error: hiroError },
       poolRegistry: POOL_REGISTRY.length,
       poolReadable,
       testPool: {
         contract: POOL_REGISTRY[0].contract,
         pair: `${POOL_REGISTRY[0].tokenXSymbol}/${POOL_REGISTRY[0].tokenYSymbol}`,
         reserveX: testPoolReserveX,
+        error: poolError,
       },
       pools: POOL_REGISTRY.map((p) => ({
         pair: `${p.tokenXSymbol}/${p.tokenYSymbol}`,
         contract: p.contract,
       })),
       ilScenarios: IL_SCENARIOS,
+      warnings,
     });
   }
 
@@ -535,13 +572,24 @@ class HODLMMSniper {
     });
 
     const best = analyses[0];
+    const failureRate = POOL_REGISTRY.length > 0 ? errors.length / POOL_REGISTRY.length : 0;
+    const isDegraded = failureRate > 0.2;
+    const warnings: string[] = [];
+    if (isDegraded) {
+      warnings.push(
+        `high_pool_failure_rate: ${Math.round(failureRate * 100)}% of pools could not be read (${errors.length}/${POOL_REGISTRY.length}). Set HIRO_API_KEY env var to raise the read-only-call quota.`
+      );
+    }
 
-    output("success", "run", {
+    output(isDegraded ? "degraded" : "success", "run", {
       analyzedAt: new Date().toISOString(),
       poolsAnalyzed: analyses.length,
       poolsErrored: errors.length,
+      poolsRegistered: POOL_REGISTRY.length,
+      failureRate: Math.round(failureRate * 1000) / 1000,
       analyses,
-      errors: errors.length > 0 ? errors : undefined,
+      errors: errors.length > 0 ? errors : [],
+      warnings,
       summary: {
         bestPool: best.pool,
         bestSignal: best.entryRecommendation.signal,
