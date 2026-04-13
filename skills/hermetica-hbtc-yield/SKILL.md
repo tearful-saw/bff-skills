@@ -34,6 +34,14 @@ sBTC sitting idle in a wallet earns nothing. Hermetica's hBTC vault is the first
 
 Mainnet deposit tx: [`b51f08cbfb1b12cf1131b5fe21d1f70b9bc6f16198ae4f0f945d299fa6f921dc`](https://explorer.hiro.so/txid/0xb51f08cbfb1b12cf1131b5fe21d1f70b9bc6f16198ae4f0f945d299fa6f921dc?chain=mainnet) — 10,000 sats sBTC deposited into hBTC vault.
 
+## Environment variables
+| Name | Required | Purpose |
+|------|----------|---------|
+| `AIBTC_ADDRESS` / `STX_ADDRESS` / `WALLET_ADDRESS` | Yes for write commands | Wallet address for deposits/redemptions |
+| `READONLY_CALL_API_HOST` | No (defaults to `https://api.hiro.so`) | Override the Hiro read-only-call host |
+| `HERMETICA_API_HOST` | No (defaults to `https://app.hermetica.fi`) | Override the Hermetica REST API host |
+| `HIRO_API_KEY` | No (recommended) | Hiro API key, raises read-only-call rate limit |
+
 ## Hermetica contracts (deployer: SP1S1HSFH0SQQGWKB69EYFNY0B1MHRMGXR3J1FH4D)
 
 | Contract | Role |

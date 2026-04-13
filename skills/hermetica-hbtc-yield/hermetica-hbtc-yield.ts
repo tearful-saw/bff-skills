@@ -35,14 +35,20 @@ const CONTRACTS = {
 /** sBTC token contract */
 const SBTC_CONTRACT = "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token";
 
+/** Hermetica REST API host (env-overridable for testing/private gateways) */
+const HERMETICA_API_HOST = process.env.HERMETICA_API_HOST || "https://app.hermetica.fi";
+
 /** Hermetica REST API endpoints */
 const API = {
-  hbtcRate: "https://app.hermetica.fi/api/v2c/info/hbtc_rate",
-  hbtcApy: "https://app.hermetica.fi/api/v2/info/apy/hbtc?range=7d",
+  hbtcRate: `${HERMETICA_API_HOST}/api/v2c/info/hbtc_rate`,
+  hbtcApy: `${HERMETICA_API_HOST}/api/v2/info/apy/hbtc?range=7d`,
 } as const;
 
-/** Stacks API for read-only calls */
-const STACKS_API = "https://api.hiro.so";
+/** Stacks API for read-only calls (env-overridable) */
+const STACKS_API = process.env.READONLY_CALL_API_HOST || "https://api.hiro.so";
+const HIRO_API_KEY = process.env.HIRO_API_KEY || process.env.READONLY_CALL_API_KEY || "";
+const hiroHeaders: Record<string, string> = { Accept: "application/json" };
+if (HIRO_API_KEY) hiroHeaders["x-api-key"] = HIRO_API_KEY;
 
 /** hBTC and sBTC both use 8 decimal places */
 const DECIMALS = 8;
@@ -112,7 +118,7 @@ async function callReadOnly(
 
   const resp = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { ...hiroHeaders, "Content-Type": "application/json" },
     body: JSON.stringify({
       sender: senderAddress,
       arguments: args,
@@ -257,7 +263,7 @@ async function getWalletAddress(): Promise<string | null> {
  */
 async function getSbtcBalance(address: string): Promise<number> {
   const url = `${STACKS_API}/extended/v1/address/${address}/balances`;
-  const resp = await fetch(url);
+  const resp = await fetch(url, { headers: hiroHeaders });
   if (!resp.ok) throw new Error(`Balance API failed: ${resp.status}`);
   const data = await resp.json() as any;
 
@@ -290,7 +296,8 @@ async function getHbtcBalance(address: string): Promise<number> {
       return parseInt(data.fungible_tokens[hbtcKey].balance || "0", 10);
     }
     return 0;
-  } catch {
+  } catch (e: any) {
+    log(`getHbtcBalance failed for ${address}: ${e?.message || e}`);
     return 0;
   }
 }
@@ -300,7 +307,7 @@ async function getHbtcBalance(address: string): Promise<number> {
  */
 async function getStxBalance(address: string): Promise<number> {
   const url = `${STACKS_API}/extended/v1/address/${address}/stx`;
-  const resp = await fetch(url);
+  const resp = await fetch(url, { headers: hiroHeaders });
   if (!resp.ok) throw new Error(`STX balance API failed: ${resp.status}`);
   const data = await resp.json() as any;
   return parseInt(data.balance || "0", 10) / 1_000_000; // Convert uSTX to STX
@@ -518,14 +525,41 @@ async function cmdDoctor(): Promise<void> {
     checks.apiReachable = !!apy;
     if (apy) {
       checks.apyPct = Math.round(apy.apyPct * 100) / 100;
+    } else {
+      warnings.push("Hermetica API returned no APY data.");
     }
-  } catch {
+  } catch (e: any) {
     checks.apiReachable = false;
-    warnings.push("Hermetica API unreachable.");
+    warnings.push(`Hermetica API unreachable: ${e?.message || e}`);
+  }
+
+  // 8. Surface env config
+  checks.config = {
+    stacksApiHost: STACKS_API,
+    hermeticaApiHost: HERMETICA_API_HOST,
+    hiroApiKeyConfigured: Boolean(HIRO_API_KEY),
+  };
+  if (!HIRO_API_KEY) {
+    warnings.push(
+      "HIRO_API_KEY not set. Doctor + status issue ~6-8 Hiro reads each; without a key, public rate limits may cause partial degradation."
+    );
   }
 
   checks.maxDepositSats = MAX_DEPOSIT_SATS;
   checks.warnings = warnings;
+
+  // Health summary: count blocking vs informational warnings so consumers can
+  // distinguish "wallet/gas/balance failure" (blocking) from "no HIRO_API_KEY"
+  // (informational, public limits still work).
+  const informationalPrefixes = ["HIRO_API_KEY not set"];
+  const blockingWarnings = warnings.filter(
+    (w) => !informationalPrefixes.some((p) => w.startsWith(p))
+  );
+  checks.health = {
+    blocking: blockingWarnings.length,
+    informational: warnings.length - blockingWarnings.length,
+    state: blockingWarnings.length === 0 ? "healthy" : "degraded",
+  };
 
   ok("doctor", checks);
 }
