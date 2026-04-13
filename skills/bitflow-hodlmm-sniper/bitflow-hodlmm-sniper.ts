@@ -65,14 +65,20 @@ function delay(ms: number): Promise<void> {
 
 function hexToUint(hex: string): bigint {
   const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
-  // Clarity uint: byte 0x01 + 16-byte big-endian uint128
+  // Clarity uint128: type byte 0x01 + 16-byte big-endian
   if (clean.startsWith("01") && clean.length === 34) {
     return BigInt("0x" + clean.slice(2));
   }
   // Clarity bool true/false
   if (clean === "03") return 1n;
   if (clean === "04") return 0n;
-  return BigInt("0x" + clean);
+  // Clarity int128 (0x00) or unexpected types — fail loud rather than silently
+  // coercing. Prior behaviour returned BigInt("0x" + clean) for any prefix,
+  // which would happily decode an optional none (0x09) or a contract principal
+  // (0x05/0x06) as a non-zero number. Caller's catch logs and returns null.
+  throw new Error(
+    `hexToUint: unexpected Clarity type prefix 0x${clean.slice(0, 2)} (full hex: ${clean.slice(0, 36)}${clean.length > 36 ? "..." : ""})`
+  );
 }
 
 function bigintToNumber(val: bigint, decimals: number): number {
@@ -278,11 +284,15 @@ interface PoolAnalysis {
   spotPrice: number;
   totalLPTokens: string;
   depthScore: string;
+  tvlSTX: number;
   fees: {
     xProtocolBps: number;
     xProviderBps: number;
     yProtocolBps: number;
     yProviderBps: number;
+    xDirectionBps: number;
+    yDirectionBps: number;
+    effectiveSwapFeeBps: number;
     totalFeeBps: number;
   };
   ilSimulation: {
@@ -305,19 +315,29 @@ function analyzePool(state: PoolState): PoolAnalysis {
   // Spot price: how much X per 1 Y
   const spotPrice = resY > 0 ? resX / resY : 0;
 
-  // Depth score based on total value locked (approximated in X terms)
-  const tvlInX = resX * 2; // Constant-product: TVL ~ 2 * reserveX
+  // Depth score in STX-equivalent terms.
+  // For STX-paired pools (4 of 5: sBTC/STX, WELSH/STX, PEPE/STX, NOT/STX),
+  // tokenY is STX so 2 * reserveY is a clean TVL approximation in STX.
+  // For STX/aeUSDC, tokenX is STX so 2 * reserveX is the right denominator.
+  // Previously this used `tvlInX = resX * 2` for all pools, which mis-classified
+  // sBTC/STX (1 sBTC ≈ raw value 1 → tvl=2 STX → "very-shallow") even though
+  // 1 sBTC at $100K is $200K of liquidity. Normalizing to STX fixes this.
+  const xIsSTX = state.pool.tokenXSymbol === "STX";
+  const tvlSTX = xIsSTX ? resX * 2 : resY * 2;
   let depthScore: string;
-  if (tvlInX > 1_000_000) depthScore = "deep";
-  else if (tvlInX > 100_000) depthScore = "moderate";
-  else if (tvlInX > 10_000) depthScore = "shallow";
+  if (tvlSTX > 1_000_000) depthScore = "deep";
+  else if (tvlSTX > 100_000) depthScore = "moderate";
+  else if (tvlSTX > 10_000) depthScore = "shallow";
   else depthScore = "very-shallow";
 
-  const totalFeeBps =
-    state.xProtocolFeeBps +
-    state.xProviderFeeBps +
-    state.yProtocolFeeBps +
-    state.yProviderFeeBps;
+  // Effective per-swap fee — a single trade only pays fees in ONE direction
+  // (x→y OR y→x), not both. Previously summed all 4 fee buckets, which doubled
+  // the displayed bps. Now: take the higher of the two single-direction sums,
+  // since a trader sees that as the realistic worst-case fee.
+  const xDirectionBps = state.xProtocolFeeBps + state.xProviderFeeBps;
+  const yDirectionBps = state.yProtocolFeeBps + state.yProviderFeeBps;
+  const effectiveSwapFeeBps = Math.max(xDirectionBps, yDirectionBps);
+  const totalFeeBps = xDirectionBps + yDirectionBps; // kept for backwards compat in output
 
   // IL simulation: normalized to $1 each of X and Y at entry
   const ilSimulation = IL_SCENARIOS.map((mult) => {
@@ -349,32 +369,34 @@ function analyzePool(state: PoolState): PoolAnalysis {
   // Depth
   if (depthScore === "deep") {
     score += 2;
-    reasons.push(`Deep liquidity: ${formatNum(resX)} ${state.pool.tokenXSymbol} + ${formatNum(resY)} ${state.pool.tokenYSymbol}`);
+    reasons.push(`Deep liquidity: ${formatNum(resX)} ${state.pool.tokenXSymbol} + ${formatNum(resY)} ${state.pool.tokenYSymbol} (~${formatNum(tvlSTX)} STX TVL)`);
   } else if (depthScore === "moderate") {
     score += 1;
-    reasons.push("Moderate liquidity depth");
+    reasons.push(`Moderate liquidity depth (~${formatNum(tvlSTX)} STX TVL)`);
   } else {
     score -= 1;
-    reasons.push("Shallow pool -- higher price impact risk");
+    reasons.push(`Shallow pool (~${formatNum(tvlSTX)} STX TVL) -- higher price impact risk`);
   }
 
-  // Fees
-  if (totalFeeBps >= 60) {
+  // Fees — score on EFFECTIVE per-swap fee (single direction), not totalFeeBps
+  // which sums both directions. A trader pays only one direction's fees per swap.
+  if (effectiveSwapFeeBps >= 30) {
     score += 2;
-    reasons.push(`High swap fees (${totalFeeBps} bps) generate strong LP income`);
-  } else if (totalFeeBps >= 20) {
+    reasons.push(`High per-swap fee (${effectiveSwapFeeBps} bps effective; ${totalFeeBps} bps total across both directions) generates strong LP income`);
+  } else if (effectiveSwapFeeBps >= 10) {
     score += 1;
-    reasons.push(`Standard swap fees (${totalFeeBps} bps)`);
+    reasons.push(`Standard per-swap fee (${effectiveSwapFeeBps} bps effective)`);
   } else {
-    reasons.push(`Low fees (${totalFeeBps} bps) -- limited LP income`);
+    reasons.push(`Low per-swap fee (${effectiveSwapFeeBps} bps effective) -- limited LP income`);
   }
 
-  // IL risk at 25% price move
-  const il25 = Math.abs(calculateIL(1.25));
-  if (il25 < 0.005) {
-    score += 1;
-    reasons.push("Low IL risk at moderate price moves");
-  }
+  // IL bonus removed: previously rewarded `calculateIL(1.25) < 0.5%`, which is
+  // mathematically unreachable for any constant-product AMM (XYK pools lose
+  // ~0.62% to IL at a 25% move). A "fix" that lowers the threshold or scenario
+  // would just trigger for every pool equally, since IL on XYK is purely a
+  // function of priceMultiplier — not a pool-specific differentiator. The
+  // ilSimulation array in the output already exposes the IL curve so the
+  // consuming agent can apply its own pair-volatility model. No score adjustment.
 
   return buildResult(score, reasons);
 
@@ -415,11 +437,15 @@ function analyzePool(state: PoolState): PoolAnalysis {
       spotPrice: Math.round(spotPrice * 100000) / 100000,
       totalLPTokens: state.totalSupply.toString(),
       depthScore,
+      tvlSTX: Math.round(tvlSTX * 100) / 100,
       fees: {
         xProtocolBps: state.xProtocolFeeBps,
         xProviderBps: state.xProviderFeeBps,
         yProtocolBps: state.yProtocolFeeBps,
         yProviderBps: state.yProviderFeeBps,
+        xDirectionBps,
+        yDirectionBps,
+        effectiveSwapFeeBps,
         totalFeeBps,
       },
       ilSimulation,
@@ -604,7 +630,7 @@ class HODLMMSniper {
 
 // --- Entry point ------------------------------------------------------------
 async function main() {
-  const command = process.argv[2] || Bun?.argv?.[2] || "run";
+  const command = process.argv[2] || "run";
 
   const sniper = new HODLMMSniper();
 
