@@ -14,7 +14,10 @@
  */
 
 // --- Config -----------------------------------------------------------------
-const HIRO_API = "https://api.hiro.so";
+const HIRO_API = process.env.READONLY_CALL_API_HOST || "https://api.hiro.so";
+const HIRO_API_KEY = process.env.HIRO_API_KEY || process.env.READONLY_CALL_API_KEY || "";
+const hiroHeaders: Record<string, string> = { Accept: "application/json" };
+if (HIRO_API_KEY) hiroHeaders["x-api-key"] = HIRO_API_KEY;
 
 // Zest Protocol (Stacky) contract addresses
 const CONTRACTS = {
@@ -94,7 +97,7 @@ async function callReadOnly(
   const response = await withTimeout(
     fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { ...hiroHeaders, "Content-Type": "application/json" },
       body: JSON.stringify({ sender: addr, arguments: args }),
     }),
     10000,
@@ -444,19 +447,22 @@ class LiquidationGuard {
 
     // Check Hiro API
     let hiroReachable = false;
+    let hiroError: string | null = null;
     try {
       const r = await withTimeout(
-        fetch(`${HIRO_API}/extended/v1/info/network_block_times`),
+        fetch(`${HIRO_API}/extended/v1/info/network_block_times`, { headers: hiroHeaders }),
         10000,
         "Hiro API health"
       );
       hiroReachable = r.ok;
+      if (!r.ok) hiroError = `HTTP ${r.status}`;
     } catch (e: any) {
-      log(`Hiro API error: ${e.message}`);
+      hiroError = e?.message || String(e);
+      log(`Hiro API error: ${hiroError}`);
     }
 
     if (!hiroReachable) {
-      output("error", "doctor", null, "Hiro API is unreachable");
+      output("error", "doctor", null, `Hiro API unreachable: ${hiroError}`);
       return;
     }
 
@@ -532,8 +538,34 @@ class LiquidationGuard {
       log(`TVL read failed: ${e.message}`);
     }
 
-    output("success", "doctor", {
-      hiro: { reachable: hiroReachable },
+    // Track which protocol reads succeeded — degrade if any failed
+    const protocolReads = {
+      btcPrice: btcPrice > 0n,
+      liquidationRatio: liquidationRatio > 0n,
+      maxLtv: maxLtv > 0n,
+      minBorrow: minBorrow > 0n,
+      totalBorrowed: totalBorrowed >= 0n, // can be 0 legitimately
+      tvl: tvl >= 0n,
+    };
+    const failedReads = Object.entries(protocolReads).filter(([, ok]) => !ok).map(([k]) => k);
+    const sharePriceFailures = Object.entries(sharePrices).filter(([, v]) => v === 0).map(([k]) => k);
+    const isDegraded = failedReads.length > 0 || sharePriceFailures.length === Object.keys(STRATEGY_NAMES).length;
+
+    const warnings: string[] = [];
+    if (failedReads.length > 0) {
+      warnings.push(`protocol_reads_failed: ${failedReads.join(", ")}`);
+    }
+    if (sharePriceFailures.length > 0 && sharePriceFailures.length < Object.keys(STRATEGY_NAMES).length) {
+      warnings.push(`partial_strategy_reads: ${sharePriceFailures.join(", ")} returned 0 (likely Hiro rate limit)`);
+    }
+    if (!HIRO_API_KEY) {
+      warnings.push(
+        "HIRO_API_KEY not set. The doctor command issues ~10 read-only Hiro calls; without a key, public rate limits may cause partial degradation."
+      );
+    }
+
+    output(isDegraded ? "degraded" : "success", "doctor", {
+      hiro: { reachable: hiroReachable, apiHost: HIRO_API, apiKeyConfigured: Boolean(HIRO_API_KEY), error: hiroError },
       contracts: CONTRACTS,
       protocol: {
         btcPriceUSD: fixed8ToNumber(btcPrice),
@@ -543,6 +575,7 @@ class LiquidationGuard {
         totalBorrowedUSD: Number(totalBorrowed) / 1_000_000,
         vaultTVL: tvl.toString(),
       },
+      protocolReadStatus: protocolReads,
       strategies: sharePrices,
       riskThresholds: {
         critical: fixed8ToNumber(HEALTH_CRITICAL),
@@ -552,8 +585,9 @@ class LiquidationGuard {
       commands: [
         "doctor",
         "run --address <STX_ADDRESS>",
-        "execute --address <STX_ADDRESS> (triggers yield auto-repay)",
+        "execute --address <STX_ADDRESS> (builds yield-auto-repay tx data; broadcast separately)",
       ],
+      warnings,
     });
   }
 

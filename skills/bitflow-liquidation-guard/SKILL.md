@@ -24,8 +24,16 @@ Autonomous DeFi agents managing leveraged positions on Zest/Stacky need real-tim
 - **`execute` builds a transaction but does NOT broadcast it**: it returns transaction parameters for a signing skill or wallet to submit. The agent or user must explicitly sign.
 - The `trigger-repay` contract function is permissionless -- anyone can call it for any user. It does not move user funds; it converts accrued yield into debt repayment.
 - Mainnet only (Stacky contracts are deployed on Stacks mainnet).
-- All contract reads timeout after 10 seconds.
-- 300ms delay between API calls to respect Hiro rate limits.
+- No mandatory API keys — public Hiro endpoints work out of the box.
+- **Optional**: set `HIRO_API_KEY` to raise the per-minute read-only-call quota. `doctor` issues ~10 reads, `run` issues ~5 per address; without a key, public limits can cause `status: "degraded"` with partial protocol reads.
+- All contract reads timeout after 10 seconds; 300ms delay between calls.
+
+## Environment variables
+| Name | Required | Purpose |
+|------|----------|---------|
+| `READONLY_CALL_API_HOST` | No (defaults to `https://api.hiro.so`) | Override the Hiro read-only-call host |
+| `HIRO_API_KEY` | No (recommended) | Hiro API key, raises read-only-call rate limit |
+| `STX_ADDRESS` | No | Default address for `run` / `execute` if `--address` not passed |
 
 ## Commands
 
@@ -54,12 +62,15 @@ bun run bitflow-liquidation-guard/bitflow-liquidation-guard.ts execute --address
 All outputs are JSON to stdout. Diagnostic logs go to stderr.
 
 ### doctor output
+
+`status` is `success` when Hiro is reachable AND all six protocol reads (btcPrice, liquidationRatio, maxLtv, minBorrow, totalBorrowed, tvl) return data, `degraded` when one or more reads fail (often Hiro rate limiting — set `HIRO_API_KEY`), `error` only when Hiro itself is unreachable.
+
 ```json
 {
   "status": "success",
   "action": "doctor",
   "data": {
-    "hiro": { "reachable": true },
+    "hiro": { "reachable": true, "apiHost": "https://api.hiro.so", "apiKeyConfigured": false, "error": null },
     "contracts": {
       "borrow": "SPCG3TNZXGFP36E4QGQN92TBM3JYF7E4PHGGR120.stacky-borrow",
       "vault": "SPCG3TNZXGFP36E4QGQN92TBM3JYF7E4PHGGR120.stacky-vault",
@@ -74,13 +85,18 @@ All outputs are JSON to stdout. Diagnostic logs go to stderr.
       "totalBorrowedUSD": 0,
       "vaultTVL": "0"
     },
+    "protocolReadStatus": {
+      "btcPrice": true, "liquidationRatio": true, "maxLtv": true,
+      "minBorrow": true, "totalBorrowed": true, "tvl": true
+    },
     "strategies": { "Zest": 1, "Granite": 1, "Hermetica": 1 },
     "riskThresholds": { "critical": 1.6, "warning": 1.8, "safe": 2.5 },
     "commands": [
       "doctor",
       "run --address <STX_ADDRESS>",
-      "execute --address <STX_ADDRESS> (triggers yield auto-repay)"
-    ]
+      "execute --address <STX_ADDRESS> (builds yield-auto-repay tx data; broadcast separately)"
+    ],
+    "warnings": ["HIRO_API_KEY not set. The doctor command issues ~10 read-only Hiro calls; without a key, public rate limits may cause partial degradation."]
   },
   "error": null
 }
