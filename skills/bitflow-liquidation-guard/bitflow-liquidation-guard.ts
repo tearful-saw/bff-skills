@@ -44,7 +44,15 @@ const STRATEGY_NAMES: Record<number, string> = {
 };
 
 // --- Helpers ----------------------------------------------------------------
-function output(status: string, action: string, data: any, error: any = null) {
+type OutputStatus = "success" | "degraded" | "blocked" | "error";
+type OutputAction = "doctor" | "run" | "execute";
+
+function output(
+  status: OutputStatus,
+  action: OutputAction | string,
+  data: unknown,
+  error: string | null = null
+): void {
   console.log(JSON.stringify({ status, action, data, error }));
 }
 
@@ -145,11 +153,24 @@ function encodePrincipal(address: string): string {
 }
 
 function c32ToBytes(address: string): string | null {
-  // c32check decode: SP/SM/ST addresses
+  // Defensive c32 decode for Stacks SP/SM/SN/ST addresses.
+  // Returns null on: wrong length, wrong prefix, invalid charset, or short payload.
+  // Note: full SIP-005 c32check checksum verification is NOT performed here —
+  // proper validation requires deriving the version byte from the human-readable
+  // second char (P=0x16, M=0x14, N=0x15, T=0x1a) rather than the encoded payload,
+  // and a third-party c32check library is the cleanest implementation. The guards
+  // below catch the realistic agent-side mistakes (truncation, wrong network
+  // prefix, lowercase typos, c32-invalid characters) before the address reaches
+  // Hiro and wastes an x402-billed read.
   const C32_CHARS = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
   const addr = address.toUpperCase();
 
-  // Strip version prefix (first 2 chars of c32)
+  // Length guard — Stacks c32 addresses are exactly 41 chars (2 prefix + 39 c32-encoded).
+  if (addr.length !== 41) return null;
+
+  // Version prefix guard — only S{P,M,N,T} are valid Stacks prefixes.
+  if (!/^S[PMNT]/.test(addr)) return null;
+
   const chars = addr.split("");
   const values: number[] = [];
   for (const c of chars) {
@@ -164,16 +185,15 @@ function c32ToBytes(address: string): string | null {
     bits += v.toString(2).padStart(5, "0");
   }
 
-  // Take bytes (skip first byte = version, take next 20 = hash160, skip last 4 = checksum)
   const allBytes: number[] = [];
   for (let i = 0; i < bits.length - (bits.length % 8); i += 8) {
     allBytes.push(parseInt(bits.slice(i, i + 8), 2));
   }
 
-  // Version byte + 20 hash bytes + 4 checksum bytes = 25 bytes
+  // Version byte + 20 hash bytes + 4 checksum bytes = 25 bytes minimum
   if (allBytes.length < 25) return null;
 
-  // Return version + 20 hash bytes as hex (skip checksum)
+  // Return version + 20 hash bytes as hex (skip checksum bytes)
   const hashBytes = allBytes.slice(0, 21);
   return hashBytes.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
@@ -259,9 +279,15 @@ async function getPosition(address: string): Promise<PositionData | null> {
         fields[name] = val;
         offset += 34;
       } else {
-        // Skip unknown types
-        log(`  Unknown field type ${typeByte} for ${name}`);
-        break;
+        // Fail loud rather than silently dropping later fields. A partial parse
+        // could underreport debt or collateral, making a position look safer
+        // than it is — the worst-case failure mode for a liquidation guard.
+        // Caller's outer catch returns null, which downstream treats as "no
+        // position found" — overreports safely (no false health signal).
+        throw new Error(
+          `Unknown Clarity tuple field type 0x${typeByte} for "${name}" (offset ${offset}). ` +
+          `Fields parsed before this point: ${Object.keys(fields).join(",") || "(none)"}.`
+        );
       }
     }
 
@@ -671,9 +697,16 @@ class LiquidationGuard {
         functionName: "trigger-repay",
         functionArgs: [{ type: "principal", value: address }],
         postConditions: [],
+        postConditionsRationale:
+          "Empty post-conditions intentional: trigger-repay is a permissionless contract function that does not move tokens from the signer. " +
+          "It only converts already-accrued vault yield into debt repayment internally on the borrowed position. " +
+          "No funds leave the signer's wallet, so no SIP-010 / STX post-condition is required to constrain the call. " +
+          "If the underlying contract changes to move signer-owned tokens, this rationale becomes invalid and post-conditions MUST be added.",
         note: "This transaction requires a wallet signature. The agent should use a signing skill or wallet integration to broadcast.",
       },
-      warning: "This will submit an on-chain transaction. Ensure the signing wallet has STX for gas fees (~0.01 STX).",
+      warning:
+        "This will submit an on-chain transaction. Ensure the signing wallet has STX for gas fees (~0.01 STX). " +
+        "Note: trigger-repay is permissionless and does not move signer-owned tokens — see transaction.postConditionsRationale for the safety basis of empty post-conditions.",
     });
   }
 }
