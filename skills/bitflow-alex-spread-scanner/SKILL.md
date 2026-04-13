@@ -53,13 +53,15 @@ All output is a single JSON object to stdout. Log lines go to stderr.
 
 ### `doctor` output
 
+`status` is `success` when both Bitflow and Alex are reachable, `degraded` when one is down (per-API `reachable: false` + `error` is surfaced), `error` only on unrecoverable failure (e.g., process-level crash).
+
 ```json
 {
   "status": "success",
   "action": "doctor",
   "data": {
-    "bitflow": { "reachable": true, "tokenCount": 202, "apiHost": "https://api.bitflowapis.finance" },
-    "alex":    { "reachable": true, "tokenCount": 29 },
+    "bitflow": { "reachable": true, "tokenCount": 202, "apiHost": "https://api.bitflowapis.finance", "error": null },
+    "alex":    { "reachable": true, "tokenCount": 29, "error": null },
     "hiro":    { "apiHost": "https://api.hiro.so", "apiKeyConfigured": false },
     "matchedTokens": 27,
     "commonPairs": [
@@ -70,6 +72,24 @@ All output is a single JSON object to stdout. Log lines go to stderr.
     "gasBufferSTX": 0.5,
     "minProfitPct": 0.1,
     "warnings": ["HIRO_API_KEY not set. With 7 scan-ready pairs, Hiro's public rate limit may cause partial scan failures."]
+  },
+  "error": null
+}
+```
+
+When one API is down, output looks like:
+
+```json
+{
+  "status": "degraded",
+  "action": "doctor",
+  "data": {
+    "bitflow": { "reachable": true,  "tokenCount": 202, "apiHost": "...", "error": null },
+    "alex":    { "reachable": false, "tokenCount": 0,   "error": "fetch failed: ECONNRESET" },
+    "matchedTokens": 0,
+    "commonPairs": [],
+    "scanReadyPairCount": 0,
+    "warnings": ["alex_unreachable: fetch failed: ECONNRESET", "partial_outage: pair discovery skipped; resolve API connectivity before running scans."]
   },
   "error": null
 }
@@ -155,8 +175,10 @@ All output is a single JSON object to stdout. Log lines go to stderr.
 
 ## Known constraints
 - Mainnet only (both Bitflow and Alex are mainnet-only).
+- **Pair discovery is limited to X/STX pairs** — the scanner does not detect cross-pair arbitrage (e.g., WELSH/sBTC) to avoid decimal-mismatch edge cases between DEX quote conventions. STX is the base currency for every detected opportunity.
 - Quotes are snapshots — price slippage between scan and execution is not accounted for.
 - Gas estimate is a fixed 0.5 STX buffer for 2 transactions; actual micro-block fees vary.
 - Does not detect MEV, front-running risk, or liquidity fragmentation.
 - `minProfitPct` filter is applied to *net* profit after gas; very small trade sizes may therefore never surface as opportunities even if the gross spread is positive.
 - Hiro read-only-call rate limits hit hard on ≥5 simultaneous pairs without `HIRO_API_KEY`; this will surface as `status: "degraded"`.
+- `doctor` is partial-failure tolerant — if Bitflow is reachable but Alex is not (or vice versa), it returns `status: "degraded"` with per-API `reachable` / `error` fields rather than failing hard.

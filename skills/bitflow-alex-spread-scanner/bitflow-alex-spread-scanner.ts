@@ -14,6 +14,14 @@
 import { BitflowSDK } from "@bitflowlabs/core-sdk";
 import { AlexSDK, Currency } from "alex-sdk";
 
+// Suppress unhandled rejections from Bitflow SDK's lazy/eager internal init when
+// the configured API host is unreachable. Without this, doctor's partial-failure
+// path can crash before fetchBitflowTokens()'s try/catch reports the error.
+// (Same workaround pattern used by skills/dca.)
+process.on("unhandledRejection", (reason: any) => {
+  console.error("[spread-scanner][unhandled-rejection]", reason?.message || reason);
+});
+
 // Max human amount this skill is designed for. Higher values risk JS float precision
 // loss in base-unit conversion (human * 10^decimals). Scan amounts are capped at 100 STX,
 // but intermediate amounts from Bitflow/Alex quotes could exceed this for very low-priced
@@ -74,6 +82,9 @@ function toBaseUnits(human: number, decimals: number): bigint {
 }
 
 function toHuman(base: bigint, decimals: number): number {
+  // Note: Number() loses IEEE-754 precision for bigints > 2^53. The MAX_SAFE_HUMAN_AMOUNT
+  // input guard on toBaseUnits keeps round-trip values well within safe range for the scan
+  // sizes documented in SCAN_AMOUNTS_STX. If you raise that cap, revisit this conversion.
   return Number(base) / 10 ** decimals;
 }
 
@@ -87,11 +98,13 @@ interface TokenMapping {
   contract?: string;
 }
 
+type ConfidenceTier = "high" | "medium" | "low";
+
 interface ArbResult {
   pair: string;
-  direction: string;
-  buyDex: string;
-  sellDex: string;
+  direction: "buy_bitflow_sell_alex" | "buy_alex_sell_bitflow";
+  buyDex: "Bitflow" | "Alex";
+  sellDex: "Bitflow" | "Alex";
   inputAmount: number;
   inputToken: string;
   intermediateAmount: number;
@@ -101,12 +114,12 @@ interface ArbResult {
   grossProfitPct: number;
   netProfitSTX: number;
   netProfitPct: number;
-  confidence: string;
+  confidence: ConfidenceTier;
 }
 
 // ─── Scanner ──────────────────────────────────────────────────────────────
 class ArbScanner {
-  bitflow: any;
+  bitflow: BitflowSDK;
   alex: AlexSDK;
   tokenMap: Map<string, TokenMapping> = new Map();
   pairs: [string, string][] = [];
@@ -116,27 +129,29 @@ class ArbScanner {
     this.alex = new AlexSDK();
   }
 
-  async buildTokenMap() {
-    log("Fetching token lists...");
-
-    // Bitflow tokens
-    let bfTokens: any[];
+  async fetchBitflowTokens(): Promise<{ tokens: any[] | null; error: string | null }> {
     try {
-      bfTokens = await this.bitflow.getAvailableTokens();
-      log(`Bitflow: ${bfTokens.length} tokens`);
+      const tokens = await this.bitflow.getAvailableTokens();
+      log(`Bitflow: ${tokens.length} tokens`);
+      return { tokens, error: null };
     } catch (e: any) {
-      throw new Error(`Bitflow API failed: ${e.message}`);
+      log(`Bitflow API failed: ${e?.message || e}`);
+      return { tokens: null, error: e?.message || String(e) };
     }
+  }
 
-    // Alex tokens
-    let alexTokens: any[];
+  async fetchAlexTokens(): Promise<{ tokens: any[] | null; error: string | null }> {
     try {
-      alexTokens = await this.alex.fetchSwappableCurrency();
-      log(`Alex: ${alexTokens.length} tokens`);
+      const tokens = await this.alex.fetchSwappableCurrency();
+      log(`Alex: ${tokens.length} tokens`);
+      return { tokens, error: null };
     } catch (e: any) {
-      throw new Error(`Alex API failed: ${e.message}`);
+      log(`Alex API failed: ${e?.message || e}`);
+      return { tokens: null, error: e?.message || String(e) };
     }
+  }
 
+  indexTokens(bfTokens: any[], alexTokens: any[]) {
     // Index Alex tokens by contract address (strip ::asset)
     const alexByContract = new Map<string, any>();
     for (const t of alexTokens) {
@@ -171,7 +186,16 @@ class ArbScanner {
     }
 
     log(`Matched tokens: ${this.tokenMap.size}`);
-    return { bitflowCount: bfTokens.length, alexCount: alexTokens.length, matchedCount: this.tokenMap.size };
+  }
+
+  async buildTokenMap() {
+    log("Fetching token lists...");
+    const bfResult = await this.fetchBitflowTokens();
+    if (!bfResult.tokens) throw new Error(`Bitflow API failed: ${bfResult.error}`);
+    const alexResult = await this.fetchAlexTokens();
+    if (!alexResult.tokens) throw new Error(`Alex API failed: ${alexResult.error}`);
+    this.indexTokens(bfResult.tokens, alexResult.tokens);
+    return { bitflowCount: bfResult.tokens.length, alexCount: alexResult.tokens.length, matchedCount: this.tokenMap.size };
   }
 
   async discoverPairs() {
@@ -320,31 +344,58 @@ class ArbScanner {
 
   // ─── Commands ───────────────────────────────────────────────────────────
   async doctor() {
-    const tokenStats = await this.buildTokenMap();
-    const pairs = await this.discoverPairs();
+    log("Fetching token lists (independently per-API for partial-failure tolerance)...");
+    const bfResult = await this.fetchBitflowTokens();
+    const alexResult = await this.fetchAlexTokens();
 
-    const commonPairs = pairs.map(([a, b]) => ({
-      tokenA: this.tokenMap.get(a)!.symbol,
-      tokenB: this.tokenMap.get(b)!.symbol,
-      bitflowIds: [a, b],
-      alexIds: [this.tokenMap.get(a)!.alexCurrency, this.tokenMap.get(b)!.alexCurrency],
-    }));
+    const bothReachable = bfResult.tokens !== null && alexResult.tokens !== null;
+
+    let matchedCount = 0;
+    let commonPairs: any[] = [];
+    let scanReadyPairCount = 0;
+
+    if (bothReachable) {
+      this.indexTokens(bfResult.tokens!, alexResult.tokens!);
+      matchedCount = this.tokenMap.size;
+      const pairs = await this.discoverPairs();
+      scanReadyPairCount = pairs.length;
+      commonPairs = pairs.map(([a, b]) => ({
+        tokenA: this.tokenMap.get(a)!.symbol,
+        tokenB: this.tokenMap.get(b)!.symbol,
+        bitflowIds: [a, b],
+        alexIds: [this.tokenMap.get(a)!.alexCurrency, this.tokenMap.get(b)!.alexCurrency],
+      }));
+    }
 
     const hiroKeyConfigured = Boolean(BITFLOW_CONFIG.READONLY_CALL_API_KEY);
     const warnings: string[] = [];
-    if (!hiroKeyConfigured && pairs.length >= 5) {
+    if (!bothReachable) {
+      if (!bfResult.tokens) warnings.push(`bitflow_unreachable: ${bfResult.error}`);
+      if (!alexResult.tokens) warnings.push(`alex_unreachable: ${alexResult.error}`);
+      warnings.push("partial_outage: pair discovery skipped; resolve API connectivity before running scans.");
+    }
+    if (bothReachable && !hiroKeyConfigured && scanReadyPairCount >= 5) {
       warnings.push(
-        `HIRO_API_KEY not set. With ${pairs.length} scan-ready pairs, Hiro's public rate limit may cause partial scan failures. Set HIRO_API_KEY to avoid degraded runs.`
+        `HIRO_API_KEY not set. With ${scanReadyPairCount} scan-ready pairs, Hiro's public rate limit may cause partial scan failures. Set HIRO_API_KEY to avoid degraded runs.`
       );
     }
 
-    output("success", "doctor", {
-      bitflow: { reachable: true, tokenCount: tokenStats.bitflowCount, apiHost: BITFLOW_CONFIG.BITFLOW_API_HOST },
-      alex: { reachable: true, tokenCount: tokenStats.alexCount },
+    output(bothReachable ? "success" : "degraded", "doctor", {
+      bitflow: {
+        reachable: bfResult.tokens !== null,
+        tokenCount: bfResult.tokens?.length ?? 0,
+        apiHost: BITFLOW_CONFIG.BITFLOW_API_HOST,
+        error: bfResult.error,
+      },
+      alex: {
+        reachable: alexResult.tokens !== null,
+        tokenCount: alexResult.tokens?.length ?? 0,
+        error: alexResult.error,
+      },
       hiro: { apiHost: BITFLOW_CONFIG.READONLY_CALL_API_HOST, apiKeyConfigured: hiroKeyConfigured },
-      matchedTokens: tokenStats.matchedCount,
+      matchedTokens: matchedCount,
       commonPairs,
-      scanReadyPairCount: pairs.length,
+      scanReadyPairCount,
       scanAmountsSTX: SCAN_AMOUNTS_STX,
       gasBufferSTX: GAS_BUFFER_STX,
       minProfitPct: MIN_PROFIT_PCT,
