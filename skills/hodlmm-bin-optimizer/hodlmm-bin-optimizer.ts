@@ -199,6 +199,12 @@ async function fetchCurrentActiveBin(
 ): Promise<{ active_bin: number; price: string } | null> {
   const meta = await fetchPoolMeta(poolId);
   if (!meta) return null;
+  // Prefer `/bins/:poolId` active_bin_id because the `/bins` endpoint refreshes
+  // on every swap-emitting block (most authoritative). Fall back to the
+  // `/pools` list's `active_bin` (cached at longer interval) only when the
+  // `/bins` response omits the field — divergence between the two during
+  // high-volatility periods is a sampling-interval artifact, not protocol
+  // state; worst case the sample lags by one list-refresh cycle.
   const binsData = await fetchJson<PoolBins>(`${HODLMM_API}/bins/${poolId}`);
   const activeBinId =
     binsData.active_bin_id !== undefined ? binsData.active_bin_id : meta.active_bin;
@@ -256,7 +262,10 @@ function computeVolatility(samples: Sample[], lookbackHours: number): Volatility
 function zFor(coverage: number): number {
   const key = coverage.toFixed(2);
   if (Z_TABLE[key] !== undefined) return Z_TABLE[key];
-  // Fallback interpolation for unusual values
+  // Conservative fallback for coverage values not in the Z_TABLE: snap to the
+  // 0.90 z-value (1.65) for anything in (0.8, 0.99) that isn't explicitly keyed.
+  // This over-widens rather than under-covers. Linear interpolation between
+  // adjacent Z_TABLE entries is a v2 item.
   if (coverage <= 0.8) return 1.28;
   if (coverage >= 0.99) return 2.58;
   return 1.65;
@@ -280,10 +289,11 @@ function computeRecommendation(
   vol: VolatilityStats,
   coverage: number,
   capitalStx: number,
+  samples: Sample[],
 ): SuggestResult["recommendation"] {
   const z = zFor(coverage);
   // Raw radius = z × std, with floor for zero-std (no observed movement yet)
-  let rawRadius = z * Math.max(vol.bin_id_std, 0.5);
+  const rawRadius = z * Math.max(vol.bin_id_std, 0.5);
   // Also ensure radius covers the max observed excursion × safety factor
   const excursionRadius = vol.max_excursion * 1.1;
   const targetRadius = Math.max(rawRadius, excursionRadius);
@@ -291,18 +301,15 @@ function computeRecommendation(
   const binCount = binRadius * 2 + 1;
   const minBinId = currentActiveBin - binRadius;
   const maxBinId = currentActiveBin + binRadius;
-  // Expected coverage: fraction of historical samples that fell within ±radius of the *mean*
-  // (use mean, not current, because the band is fit to historical behavior)
+  // Expected coverage = direct count of historical samples that fell within
+  // ±bin_radius of the observed mean. Auditable ("N of M samples were in range")
+  // vs the prior p5/p95 heuristic.
+  let inRange = 0;
+  for (const s of samples) {
+    if (Math.abs(s.active_bin - vol.mean_bin_id) <= binRadius) inRange += 1;
+  }
   const expectedCoveragePct =
-    vol.samples > 0
-      ? Math.min(
-          100,
-          100 *
-            (vol.p95_bin_id - vol.p5_bin_id <= binRadius * 2
-              ? 0.9 + Math.max(0, (binRadius * 2 - (vol.p95_bin_id - vol.p5_bin_id)) / Math.max(1, binRadius * 2)) * 0.1
-              : 0.9 * ((binRadius * 2) / Math.max(1, vol.p95_bin_id - vol.p5_bin_id))),
-        )
-      : 0;
+    samples.length > 0 ? (inRange / samples.length) * 100 : 0;
   const capitalPerBin = Math.floor((capitalStx * 1_000_000) / binCount); // microSTX
   return {
     coverage_target: coverage,
@@ -552,7 +559,7 @@ async function cmdSuggest(
     });
     return;
   }
-  const rec = computeRecommendation(current.active_bin, vol, coverage, capitalStx);
+  const rec = computeRecommendation(current.active_bin, vol, coverage, capitalStx, samples);
   const confidence = classifyConfidence(vol.samples, lookbackHours, vol.bin_id_std);
   const result: SuggestResult = {
     pool_id: poolId,

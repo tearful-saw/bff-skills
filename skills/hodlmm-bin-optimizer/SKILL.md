@@ -7,7 +7,7 @@ metadata:
   user-invocable: "false"
   arguments: "doctor | sample | bootstrap | suggest | config | history | install-packs"
   entry: "hodlmm-bin-optimizer/hodlmm-bin-optimizer.ts"
-  requires: "settings"
+  requires: ""
   tags: "defi, read-only, mainnet-only, l2"
 ---
 
@@ -133,6 +133,7 @@ All outputs are JSON to stdout. Logs go to stderr. Every command returns:
 
 ## Known constraints
 - **Cold start**: first samples build slowly. `bootstrap` from Hiro is best-effort; typical fallback is 24h of organic `sample` runs before `suggest` has ≥5 samples.
+- **Bootstrap samples carry the collection timestamp, not on-chain event time.** The Hiro event stream doesn't return `block_time` inline, so every bootstrap-parsed event is stamped with "now". Consequence: immediately after `bootstrap`, a narrow lookback window (e.g. `--lookback 6`) will pull in all bootstrapped events as if they happened in the last 6h. Guidance: after a `bootstrap` run, prefer `--lookback 24` or larger until organic `sample` observations dominate the window. A future version that enriches events with `block_time` via per-tx fetch is a v2 item.
 - **No price-space model**: recommendations are in bin-space. For pools with unusual `bin_step` (e.g. 1 bps for stable pairs), the same bin-radius implies very different price ranges. Operator should interpret with pool `bin_step` in mind.
 - **Equal-weighted window**: v1 uses a uniform window. EWMA / regime-change detection is future work.
 - **Excursion floor**: radius is always ≥ max historical excursion × 1.1 to prevent fitting only to the std when a single long tail exists.
