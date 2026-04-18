@@ -26,6 +26,7 @@
 
 import { Command } from "commander";
 import { readFileSync, writeFileSync, existsSync, renameSync } from "fs";
+import { randomBytes } from "crypto";
 import { join } from "path";
 import { homedir } from "os";
 import {
@@ -164,11 +165,13 @@ function loadState(): RouterState {
 }
 
 function saveState(state: RouterState): void {
-  // Atomic write: tmp → rename. Prevents a torn JSON if two `decide` calls
-  // overlap (cron + manual, or `run`'s own scan→decide→plan chain on SIGTERM).
-  // A torn file is silently swallowed by loadState's catch block, which would
-  // erase current_mode + history — unacceptable for dwell-time correctness.
-  const tmp = `${STATE_PATH}.tmp`;
+  // Atomic write: per-process unique tmp → rename. The unique suffix prevents
+  // concurrent writers (cron `run` + manual `decide`/`set-mode`) from clobbering
+  // each other's in-flight tmp file, which would either swap the wrong payload
+  // in via rename or trip ENOENT on the losing rename. Full lost-update races
+  // across independent load/mutate/save cycles still need an external lock;
+  // this fix only covers the tmp-file collision.
+  const tmp = `${STATE_PATH}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
   writeFileSync(tmp, JSON.stringify(state, null, 2));
   renameSync(tmp, STATE_PATH);
 }
@@ -495,13 +498,23 @@ async function cmdDoctor(poolId: string | undefined): Promise<void> {
           apr: pool.apr,
           apr24h: pool.apr24h,
         };
-        if (
-          pool.tokens.tokenY.contract !== SBTC_TOKEN &&
-          pool.tokens.tokenX.contract !== SBTC_TOKEN
-        ) {
+        const sbtcIsX = pool.tokens.tokenX.contract === SBTC_TOKEN;
+        const sbtcIsY = pool.tokens.tokenY.contract === SBTC_TOKEN;
+        if (!sbtcIsX && !sbtcIsY) {
           issues.push(
             `pool ${poolId} is not sBTC-paired (router v1 only supports sBTC routing)`,
           );
+        } else {
+          // buildPlan hardcodes STX as the non-sBTC swap leg, so an sBTC/<non-STX>
+          // pool would emit structurally wrong bitflow args. Gate that at doctor.
+          const otherContract = sbtcIsX
+            ? pool.tokens.tokenY.contract
+            : pool.tokens.tokenX.contract;
+          if (otherContract !== STX_TOKEN) {
+            issues.push(
+              `pool ${poolId} is sBTC-paired but non-STX counterpart (${otherContract}); router v1 plan builder assumes STX/sBTC`,
+            );
+          }
         }
       } catch (e) {
         issues.push(`HODLMM pool ${poolId} fetch failed: ${(e as Error).message}`);
@@ -548,7 +561,7 @@ async function cmdDoctor(poolId: string | undefined): Promise<void> {
   });
 }
 
-async function cmdScan(poolId: string): Promise<void> {
+async function cmdScan(poolId: string): Promise<boolean> {
   const state = loadState();
   const poolState = ensurePoolState(state, poolId);
   let hodlmmPool: HodlmmPoolDetail;
@@ -561,7 +574,23 @@ async function cmdScan(poolId: string): Promise<void> {
       data: null,
       error: { code: "HODLMM_FETCH_FAILED", message: (e as Error).message },
     });
-    return;
+    return false;
+  }
+  // A pool JSON with both apr fields missing is not a real "0% APR" signal —
+  // treat it as stale data so decide() never biases toward switch_to_zest on
+  // fabricated zeros.
+  if (hodlmmPool.apr == null && hodlmmPool.apr24h == null) {
+    output({
+      status: "error",
+      action: "scan",
+      data: null,
+      error: {
+        code: "HODLMM_DATA_STALE",
+        message: `pool ${poolId} returned no apr or apr24h fields`,
+        next: "retry on next cycle; if persistent, verify the pool id or Bitflow schema",
+      },
+    });
+    return false;
   }
   let zest: Awaited<ReturnType<typeof fetchZestSupplyApy>>;
   try {
@@ -573,11 +602,11 @@ async function cmdScan(poolId: string): Promise<void> {
       data: null,
       error: { code: "ZEST_FETCH_FAILED", message: (e as Error).message },
     });
-    return;
+    return false;
   }
   const snapshot: RateSnapshot = {
     ts: new Date().toISOString(),
-    hodlmm_apr_pct: hodlmmPool.apr ?? 0,
+    hodlmm_apr_pct: hodlmmPool.apr ?? hodlmmPool.apr24h ?? 0,
     hodlmm_apr24h_pct: hodlmmPool.apr24h ?? hodlmmPool.apr ?? 0,
     zest_supply_apy_pct: zest.supply_apy_pct,
     zest_borrow_apy_pct: zest.borrow_apy_pct,
@@ -594,9 +623,10 @@ async function cmdScan(poolId: string): Promise<void> {
     data: snapshot,
     error: null,
   });
+  return true;
 }
 
-async function cmdDecide(poolId: string, knobs: DecisionKnobs): Promise<void> {
+async function cmdDecide(poolId: string, knobs: DecisionKnobs): Promise<boolean> {
   const state = loadState();
   const poolState = ensurePoolState(state, poolId);
   if (!poolState.last_scan) {
@@ -610,20 +640,25 @@ async function cmdDecide(poolId: string, knobs: DecisionKnobs): Promise<void> {
         next: `run \`scan --pool ${poolId}\` first`,
       },
     });
-    return;
+    return false;
   }
-  // Reuse last scan if fresh (<15 min); otherwise re-scan. Track whether the
-  // decision ran on stale data so downstream can flag it.
+  // Reuse last scan if fresh (<15 min); otherwise re-scan. If the re-scan
+  // fails we refuse to decide rather than persisting a DecisionRecord computed
+  // on stale input — history fidelity + orchestrator trust matter more than
+  // returning an answer.
   const scanAgeMs = Date.now() - new Date(poolState.last_scan.ts).getTime();
-  let scanStale = scanAgeMs > 15 * 60 * 1000;
-  if (scanStale) {
+  const needsRescan = scanAgeMs > 15 * 60 * 1000;
+  if (needsRescan) {
     log(`last scan is ${Math.round(scanAgeMs / 60000)} min old — re-scanning`);
     try {
       const hodlmmPool = await fetchHodlmmPool(poolId);
+      if (hodlmmPool.apr == null && hodlmmPool.apr24h == null) {
+        throw new Error(`pool ${poolId} returned no apr or apr24h fields`);
+      }
       const zest = await fetchZestSupplyApy();
       poolState.last_scan = {
         ts: new Date().toISOString(),
-        hodlmm_apr_pct: hodlmmPool.apr ?? 0,
+        hodlmm_apr_pct: hodlmmPool.apr ?? hodlmmPool.apr24h ?? 0,
         hodlmm_apr24h_pct: hodlmmPool.apr24h ?? hodlmmPool.apr ?? 0,
         zest_supply_apy_pct: zest.supply_apy_pct,
         zest_borrow_apy_pct: zest.borrow_apy_pct,
@@ -632,10 +667,19 @@ async function cmdDecide(poolId: string, knobs: DecisionKnobs): Promise<void> {
         hodlmm_tvl_usd: hodlmmPool.tvlUsd ?? null,
         hodlmm_volume_usd_1d: hodlmmPool.volumeUsd1d ?? null,
       };
-      scanStale = false;
+      saveState(state);
     } catch (e) {
-      log(`re-scan failed: ${(e as Error).message}, using stale data`);
-      // scanStale stays true
+      output({
+        status: "error",
+        action: "decide",
+        data: null,
+        error: {
+          code: "RESCAN_FAILED",
+          message: `last scan is ${Math.round(scanAgeMs / 60000)} min old and re-scan failed: ${(e as Error).message}`,
+          next: "retry on next cycle; refusing to decide on stale data",
+        },
+      });
+      return false;
     }
   }
   const decision = decide(poolState, poolState.last_scan, knobs);
@@ -654,10 +698,11 @@ async function cmdDecide(poolId: string, knobs: DecisionKnobs): Promise<void> {
       scan_age_min: Math.round(
         (Date.now() - new Date(poolState.last_scan.ts).getTime()) / 60000,
       ),
-      scan_stale: scanStale,
+      scan_stale: false,
     },
     error: null,
   });
+  return true;
 }
 
 async function cmdPlan(
@@ -706,9 +751,13 @@ async function cmdRun(
   knobs: DecisionKnobs,
   confirm: boolean,
 ): Promise<void> {
-  // run = scan + decide + plan in one cycle
-  await cmdScan(poolId);
-  await cmdDecide(poolId, knobs);
+  // run = scan + decide + plan in one cycle. Short-circuit on stage failure so
+  // orchestrators reading `tail -n 1 | jq .data` don't mistake a failed cycle's
+  // trailing NO_SCAN/NO_DECISION plan envelope for a legitimate `stay`.
+  const scanOk = await cmdScan(poolId);
+  if (!scanOk) return;
+  const decideOk = await cmdDecide(poolId, knobs);
+  if (!decideOk) return;
   await cmdPlan(poolId, stxAddress, knobs);
   if (confirm) {
     log(
@@ -764,9 +813,10 @@ function cmdHistory(poolId: string, limit: number): void {
 function cmdSetMode(poolId: string, mode: Mode): void {
   const state = loadState();
   const poolState = ensurePoolState(state, poolId);
-  if (poolState.current_mode !== mode) {
-    poolState.last_switched_at = new Date().toISOString();
-  }
+  // Always reset last_switched_at — SKILL.md documents this as the sanctioned
+  // way to restart the dwell clock, including when re-confirming the same mode
+  // after a manual re-deposit. A conditional update would silently no-op that.
+  poolState.last_switched_at = new Date().toISOString();
   poolState.current_mode = mode;
   saveState(state);
   output({

@@ -8,7 +8,11 @@
 5. If `step_count > 0`, invoke the plan steps in order via the named CLIs. After the final step succeeds, call `set-mode --pool <id> --mode <new>` so dwell-time restarts.
 
 ## Guardrails
-- **Never execute plan steps without verifying balances first.** The router's plan is a template; `<stx-from-exit>`, `<sbtc-balance>`, `<50pct-of-sbtc>` are placeholders the orchestrator must resolve from wallet state at execution time.
+- **Never execute plan steps without verifying balances first.** The router's plan is a template; the orchestrator must resolve these placeholders from wallet state at execution time. Units are load-bearing — do not mix decimal and sats:
+  - `<stx-balance-decimal>` — switch_to_zest step 2 (`bitflow swap --amount-in`). **Human-readable decimal STX** (e.g. `21.0`). Source: post-exit STX balance.
+  - `<sbtc-balance-sats>` — switch_to_zest step 3 (`zest-yield-manager run --amount`). **Integer sats**. Source: post-swap sBTC wallet balance.
+  - `<supplied-sbtc-sats>` — switch_to_hodlmm step 1 (`zest-yield-manager run --amount`). **Integer sats**. Source: `zest-yield-manager run --action=status` (Zest has no `max` sentinel).
+  - `<50pct-sbtc-decimal>` — switch_to_hodlmm step 2 (`bitflow swap --amount-in`). **Human-readable decimal sBTC** (e.g. `0.00025` for 25k sats), half of the withdrawn sBTC.
 - **Confirm dwell_ok before acting.** If `dwell_ok: false` and the plan still shows steps (shouldn't happen in v1, but in case of downstream bugs), refuse to execute — the router thinks enough time has passed but safety says otherwise.
 - **Respect cost_model.net_benefit_pct, and know what it excludes.** `net_benefit_pct = |gap| - amortized_round_trip_cost_pct`. It does NOT subtract the entry-gap threshold (`enter_zest_gap` / `enter_hodlmm_gap`), so a positive value can still be "barely above the trigger" — e.g. gap 30.24% vs threshold 28.07% = only 2.17% of true margin above the switch line, even if net_benefit_pct reads 4.17%. If you need margin-above-threshold, compute `|gap| - threshold_pct` directly from the decision payload. Negative net_benefit = the router already rejected the switch; don't override.
 - **Never modify `last_switched_at` by editing state directly** — use `set-mode` so dwell-time logic is consistent.
@@ -30,7 +34,9 @@ Every command returns:
 | Code | Meaning | Next |
 |---|---|---|
 | `HODLMM_FETCH_FAILED` | Bitflow app API unreachable or returned bad data | retry on next cycle; check `doctor` |
+| `HODLMM_DATA_STALE` | Bitflow returned a pool JSON with no `apr` or `apr24h` fields | retry on next cycle; verify pool id and Bitflow schema |
 | `ZEST_FETCH_FAILED` | Hiro readonly call failed | retry on next cycle; check `doctor` |
+| `RESCAN_FAILED` | `decide` found a >15 min old snapshot and the re-scan failed — router refuses to decide on stale data | retry on next cycle; the previous scan/decision in state is untouched |
 | `NO_SCAN` | `decide` called before any `scan` | run `scan` first |
 | `NO_DECISION` | `plan` called before any `decide` | run `decide` first |
 | `BAD_KNOB` | CLI arg out of range | fix args |
@@ -48,8 +54,13 @@ Every command returns:
 # every 30 min
 bun run .../hodlmm-zest-yield-router.ts run --pool dlmm_6 --stx-address $STX_ADDR | tee last-cycle.json
 
-# parse the LAST line of stdout (the plan envelope)
-plan=$(tail -n 1 last-cycle.json | jq -c .data)
+# parse the LAST line of stdout. A failed scan/decide short-circuits `run`, so
+# the tail envelope may be an error instead of the plan — check status first.
+last=$(tail -n 1 last-cycle.json)
+status=$(echo "$last" | jq -r .status)
+[ "$status" != "success" ] && { echo "cycle failed: $last" >&2; exit 1; }
+
+plan=$(echo "$last" | jq -c .data)
 steps=$(echo "$plan" | jq -c '.steps[]')
 
 # if no steps → stay (exit 0)

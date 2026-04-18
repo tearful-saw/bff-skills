@@ -1,14 +1,13 @@
 ---
 name: hodlmm-zest-yield-router
-description: "Autonomous capital allocator between HODLMM LP and Zest sBTC supply — live APY comparison with hysteresis, dwell-time, and cost-amortization, emitting a composable execution plan."
-metadata:
-  author: "tearful-saw"
-  author-agent: "Elegant Orb"
-  user-invocable: "false"
-  arguments: "doctor | scan | decide | plan | run | status | history | set-mode | install-packs"
-  entry: "hodlmm-zest-yield-router/hodlmm-zest-yield-router.ts"
-  requires: "wallet, settings"
-  tags: "defi, read-only, mainnet-only, l2"
+description: Autonomous capital allocator between HODLMM LP and Zest sBTC supply — live APY comparison with hysteresis, dwell-time, and cost-amortization, emitting a composable execution plan.
+author: tearful-saw
+author_agent: Elegant Orb
+user-invocable: false
+arguments: doctor | scan | decide | plan | run | status | history | set-mode | install-packs
+entry: hodlmm-zest-yield-router/hodlmm-zest-yield-router.ts
+requires: [wallet, settings]
+tags: [defi, read-only, mainnet-only, l2]
 ---
 
 # HODLMM ↔ Zest Yield Router
@@ -25,7 +24,7 @@ Any agent holding sBTC-paired HODLMM LP has two active yield sources: concentrat
 - **Read-only skill**. Never writes on-chain, never moves funds. All writes are delegated to downstream skills named in the `plan.steps[].invocation`.
 - **Composes, does not bundle** per [#483](https://github.com/BitflowFinance/bff-skills/issues/483) composition rules. The router produces a runnable plan; the caller (or orchestrator) invokes the named skills.
 - **Mainnet only**. Bitflow HODLMM + Zest V2 are mainnet-only.
-- **sBTC-paired pools only** (v1). Doctor flags non-sBTC pools as unsupported.
+- **STX/sBTC pools only** (v1). The plan builder hardcodes STX as the non-sBTC swap leg; doctor flags non-sBTC pairs and sBTC/`<non-STX>` pairs as unsupported.
 - **State file** at `~/.hodlmm-zest-yield-router.json` (overridable via `HODLMM_ZEST_ROUTER_STATE`). No secrets stored.
 - **Dwell-time enforced** — once a switch happens, `--min-dwell` hours must pass before another switch is considered. Prevents oscillation at the boundary.
 - **Hysteresis** — `--enter-zest-gap` and `--enter-hodlmm-gap` are separate thresholds. Switching to Zest requires a wider gap than the reverse (or vice versa) to avoid boundary flip-flop.
@@ -211,7 +210,7 @@ Router outputs slot into:
 
 ## Known constraints
 
-- **sBTC-only v1**. Routing is specific to sBTC-paired HODLMM + Zest sBTC supply. Other reserves (USDh, stSTX) can be added by parameterizing the reserve address.
+- **STX/sBTC only v1**. Routing is specific to STX/sBTC HODLMM pools + Zest sBTC supply. Other reserves (USDh, stSTX) and other sBTC counterparts can be added by parameterizing the reserve address and the swap leg.
 - **Zest rate scale**. `current-liquidity-rate` is divided by `1e8` (empirically calibrated against USDh ≈ 4%, stSTX ≈ 0.01%, sBTC ≈ 0.2% live rates). AAVE ray (`1e27`) does NOT work for Zest V2.
 - **HODLMM APR source**. Uses `apr24h` if present, falls back to `apr` (lifetime). 24h is more responsive to regime changes but noisier; the cost-amortization knob (`--dwell-days`) is how you temper that.
 - **No direct writes in v1**. The router is decision + plan only. A future v2 may add `--execute` that shells out to the named CLIs once they expose stable, idempotent interfaces.
