@@ -18,7 +18,7 @@
  */
 
 import { Command } from "commander";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, renameSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -118,6 +118,7 @@ interface SuggestResult {
     max_bin_id: number;
     expected_coverage_pct: number;
     capital_per_bin_stx: number;
+    capital_per_bin_micro_stx: number;
     total_capital_stx: number;
   };
   range_keeper_config: {
@@ -163,7 +164,11 @@ function loadState(): OptimizerState {
 }
 
 function saveState(state: OptimizerState): void {
-  writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+  // Atomic write: tmp → rename. Protects against torn JSON on SIGTERM/OOM
+  // if a cron run overlaps with a concurrent `suggest` invocation.
+  const tmp = `${STATE_PATH}.tmp`;
+  writeFileSync(tmp, JSON.stringify(state, null, 2));
+  renameSync(tmp, STATE_PATH);
 }
 
 // ─── HTTP ────────────────────────────────────────────────────────────────
@@ -262,23 +267,34 @@ function computeVolatility(samples: Sample[], lookbackHours: number): Volatility
 function zFor(coverage: number): number {
   const key = coverage.toFixed(2);
   if (Z_TABLE[key] !== undefined) return Z_TABLE[key];
-  // Conservative fallback for coverage values not in the Z_TABLE: snap to the
-  // 0.90 z-value (1.65) for anything in (0.8, 0.99) that isn't explicitly keyed.
-  // This over-widens rather than under-covers. Linear interpolation between
-  // adjacent Z_TABLE entries is a v2 item.
-  if (coverage <= 0.8) return 1.28;
-  if (coverage >= 0.99) return 2.58;
+  // Unlisted coverage: linearly interpolate between the two nearest Z_TABLE
+  // entries. Log a stderr note so operators see the estimate is derived.
+  const keys = Object.keys(Z_TABLE)
+    .map((k) => parseFloat(k))
+    .sort((a, b) => a - b);
+  if (coverage <= keys[0]) return Z_TABLE[keys[0].toFixed(2)];
+  if (coverage >= keys[keys.length - 1]) return Z_TABLE[keys[keys.length - 1].toFixed(2)];
+  for (let i = 0; i < keys.length - 1; i++) {
+    if (coverage >= keys[i] && coverage <= keys[i + 1]) {
+      const lo = keys[i];
+      const hi = keys[i + 1];
+      const zLo = Z_TABLE[lo.toFixed(2)];
+      const zHi = Z_TABLE[hi.toFixed(2)];
+      const frac = (coverage - lo) / (hi - lo);
+      const interp = zLo + frac * (zHi - zLo);
+      log(`zFor: coverage ${coverage} interpolated between ${lo}(z=${zLo}) and ${hi}(z=${zHi}) → ${interp.toFixed(3)}`);
+      return interp;
+    }
+  }
   return 1.65;
 }
 
 function classifyConfidence(
   samples: number,
   lookbackHours: number,
-  std: number,
 ): "high" | "medium" | "low" {
-  // Rule: ≥12 samples/hour avg AND ≥24 effective hours → high; halve for medium
+  // `suggest` already early-returns at <5 samples, so this runs only with ≥5.
   const perHour = samples / Math.max(1, lookbackHours);
-  if (std === 0 && samples < 5) return "low"; // flat pool, not enough data
   if (samples >= 200 && perHour >= 8) return "high";
   if (samples >= 50 && perHour >= 2) return "medium";
   return "low";
@@ -302,15 +318,18 @@ function computeRecommendation(
   const minBinId = currentActiveBin - binRadius;
   const maxBinId = currentActiveBin + binRadius;
   // Expected coverage = direct count of historical samples that fell within
-  // ±bin_radius of the observed mean. Auditable ("N of M samples were in range")
-  // vs the prior p5/p95 heuristic.
+  // ±bin_radius of the **deployed center** (the current active bin). Measuring
+  // against `currentActiveBin` instead of `vol.mean_bin_id` is what the
+  // recommendation actually describes: the deployed range will be centered on
+  // the active bin, so coverage must be measured there. Using mean would
+  // overstate coverage whenever price has drifted from the historical center.
   let inRange = 0;
   for (const s of samples) {
-    if (Math.abs(s.active_bin - vol.mean_bin_id) <= binRadius) inRange += 1;
+    if (Math.abs(s.active_bin - currentActiveBin) <= binRadius) inRange += 1;
   }
   const expectedCoveragePct =
     samples.length > 0 ? (inRange / samples.length) * 100 : 0;
-  const capitalPerBin = Math.floor((capitalStx * 1_000_000) / binCount); // microSTX
+  const capitalPerBinMicro = Math.floor((capitalStx * 1_000_000) / binCount); // microSTX, single floor
   return {
     coverage_target: coverage,
     bin_radius: binRadius,
@@ -318,7 +337,8 @@ function computeRecommendation(
     min_bin_id: minBinId,
     max_bin_id: maxBinId,
     expected_coverage_pct: Number(expectedCoveragePct.toFixed(2)),
-    capital_per_bin_stx: Number((capitalPerBin / 1_000_000).toFixed(4)),
+    capital_per_bin_stx: Number((capitalPerBinMicro / 1_000_000).toFixed(4)),
+    capital_per_bin_micro_stx: capitalPerBinMicro,
     total_capital_stx: capitalStx,
   };
 }
@@ -346,11 +366,15 @@ async function hiroBootstrap(
   poolContract: string,
   hours: number,
 ): Promise<Sample[]> {
-  // Fetch recent contract events; pagination up to a safety cap
+  // Fetch recent contract events; pagination up to a safety cap.
+  // `hours` is currently advisory — Hiro's /events list doesn't return
+  // per-event `block_time`, so we can't cut off by on-chain age yet. The
+  // parameter is preserved for the v2 enrichment path that adds a per-tx
+  // fetch to get `block_time`.
   const limit = 50;
   const maxPages = 20; // 1000 events ceiling
   const samples: Sample[] = [];
-  const cutoffTs = Date.now() - hours * 3600_000;
+  void hours; // see above — reserved for v2 block_time cutoff
   let offset = 0;
 
   const headers: Record<string, string> = {};
@@ -376,8 +400,10 @@ async function hiroBootstrap(
     // treat these as equal-weighted regardless of timing.
     for (const ev of data.results) {
       const repr = ev.contract_log?.value?.repr || "";
-      // Expect active-bin state in swap/deposit events; conservative parse
-      const match = repr.match(/active[-_]?bin[^0-9\-]*(-?\d+)/i);
+      // Anchor to a Clarity tuple entry for the *current* active bin.
+      // Accepts `(active-bin u499)` / `(active-bin 499)` / `(active-bin-id u499)`.
+      // Rejects fields like `previous-active-bin` / `active-bin-before`.
+      const match = repr.match(/\((?:active-bin|active-bin-id)\s+u?(-?\d+)\)/);
       if (match) {
         samples.push({
           ts: new Date().toISOString(),
@@ -390,9 +416,6 @@ async function hiroBootstrap(
     offset += limit;
     if (data.results.length < limit) break;
   }
-  // Cutoff check is symbolic here since events lack timestamps; suggest uses
-  // the full bootstrap set as cold-start priors, not ongoing data.
-  void cutoffTs;
   return samples;
 }
 
@@ -427,7 +450,10 @@ async function cmdDoctor(poolId: string | undefined): Promise<void> {
   info.state = {
     path: STATE_PATH,
     tracked_pools: trackedPools,
-    samples_total: trackedPools.reduce((a, p) => a + state.pools[p].samples.length, 0),
+    samples_total: trackedPools.reduce(
+      (a: number, p: string) => a + (state.pools[p]?.samples?.length ?? 0),
+      0,
+    ),
   };
   info.hiro_api_key_set = Boolean(process.env.HIRO_API_KEY);
   const status: OutputStatus = issues.length > 0 ? "blocked" : "success";
@@ -560,7 +586,7 @@ async function cmdSuggest(
     return;
   }
   const rec = computeRecommendation(current.active_bin, vol, coverage, capitalStx, samples);
-  const confidence = classifyConfidence(vol.samples, lookbackHours, vol.bin_id_std);
+  const confidence = classifyConfidence(vol.samples, lookbackHours);
   const result: SuggestResult = {
     pool_id: poolId,
     current_active_bin: current.active_bin,
@@ -570,7 +596,7 @@ async function cmdSuggest(
       poolId,
       centerBinOffset: 0,
       binRadius: rec.bin_radius,
-      stxAmountPerBin: Math.floor(rec.capital_per_bin_stx * 1_000_000),
+      stxAmountPerBin: rec.capital_per_bin_micro_stx,
     },
     confidence,
     reason: `${vol.samples} samples over ${lookbackHours}h, std=${vol.bin_id_std}, excursion=${vol.max_excursion} bins → recommended radius ${rec.bin_radius} (z=${zFor(coverage)})`,
