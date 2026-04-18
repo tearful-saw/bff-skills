@@ -129,9 +129,28 @@ All outputs are JSON to stdout. Logs go to stderr.
     "pool_id": "dlmm_6",
     "decision": "switch_to_hodlmm",
     "steps": [
-      { "order": 1, "action": "zest-withdraw", "invocation": { "type": "cli", "skill": "zest-yield-manager", "command": "run", "args": ["--action","withdraw","--amount-sats","max"] } },
-      { "order": 2, "action": "swap-half-to-stx", "invocation": { "type": "cli", "skill": "bitflow", "command": "swap", "args": ["--from","sBTC","--to","STX","--amount","<50pct-of-sbtc>","--slippage","3","--confirm"] } },
-      { "order": 3, "action": "hodlmm-deposit", "invocation": { "type": "cli", "skill": "hodlmm-move-liquidity", "command": "run", "args": ["--pool","dlmm_6","--center-on-active","--wallet","SP...","--confirm"] } }
+      {
+        "order": 1,
+        "action": "zest-withdraw",
+        "invocation": { "type": "cli", "skill": "zest-yield-manager", "command": "run",
+          "args": ["--action=withdraw", "--amount=<supplied-sbtc-sats>"] }
+      },
+      {
+        "order": 2,
+        "action": "swap-half-sbtc-to-stx",
+        "invocation": { "type": "cli", "skill": "bitflow", "command": "swap",
+          "args": ["--token-x", "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token",
+                   "--token-y", "SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.token-stx-v-1-2",
+                   "--amount-in", "<50pct-sbtc-decimal>",
+                   "--slippage-tolerance", "0.03",
+                   "--confirm-high-impact"] }
+      },
+      {
+        "order": 3,
+        "action": "hodlmm-deposit",
+        "invocation": { "type": "user-confirm",
+          "prompt": "Confirm HODLMM LP position for pool dlmm_6 has been freshly deposited (STX + sBTC ~50/50 around the active bin, DLP shares visible on-chain for wallet SP...). Orchestrator must not call `set-mode --mode hodlmm` until this is true." }
+      }
     ],
     "step_count": 3,
     "notes": "execute steps in order; router does not write on-chain in v1, compose via named skills"
@@ -140,12 +159,53 @@ All outputs are JSON to stdout. Logs go to stderr.
 }
 ```
 
+**Plan example (switch_to_zest):**
+```json
+{
+  "data": {
+    "decision": "switch_to_zest",
+    "steps": [
+      {
+        "order": 1,
+        "action": "hodlmm-exit",
+        "invocation": { "type": "user-confirm",
+          "prompt": "Confirm HODLMM LP position for pool dlmm_6 is fully withdrawn..." }
+      },
+      {
+        "order": 2,
+        "action": "swap-stx-to-sbtc",
+        "invocation": { "type": "cli", "skill": "bitflow", "command": "swap",
+          "args": ["--token-x", "SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.token-stx-v-1-2",
+                   "--token-y", "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token",
+                   "--amount-in", "<stx-balance-decimal>",
+                   "--slippage-tolerance", "0.03",
+                   "--confirm-high-impact"] }
+      },
+      {
+        "order": 3,
+        "action": "zest-supply",
+        "invocation": { "type": "cli", "skill": "zest-yield-manager", "command": "run",
+          "args": ["--action=supply", "--amount=<sbtc-balance-sats>"] }
+      }
+    ]
+  }
+}
+```
+
+**Invocation types orchestrators must handle:**
+
+- `type: "cli"` — spawn `<skill> <command> <args...>`. Flag shapes in these examples are verified against upstream `aibtcdev/skills` main as of 2026-04-18; do not remap flags.
+- `type: "user-confirm"` — hard stop. Present `prompt` to operator. Proceed only after explicit confirmation. Used where no registry skill exposes the required primitive (HODLMM full-exit, HODLMM fresh-deposit).
+- `--amount=<supplied-sbtc-sats>` is an integer placeholder (Zest has no `max` sentinel). Orchestrator must call `zest-yield-manager run --action=status` first to resolve.
+- `--amount-in <decimal>` on `bitflow swap` is **decimal human-readable** (e.g. `0.00025` for 25k sats), not raw sats.
+- `--slippage-tolerance` on `bitflow swap` is **decimal 0–1** (e.g. `0.03` = 3%), NOT percentage. Passing `3` would request 300% tolerance.
+
 ## Composability
 
 Router outputs slot into:
-- [`hodlmm-move-liquidity`](https://github.com/aibtcdev/skills/tree/main/hodlmm-move-liquidity) — executes HODLMM deposit/rebalance
-- [`zest-yield-manager`](https://github.com/aibtcdev/skills/tree/main/zest-yield-manager) — executes Zest supply/withdraw
-- [`bitflow`](https://github.com/aibtcdev/skills/tree/main/bitflow) — executes sBTC↔STX rebalance swap
+- [`zest-yield-manager`](https://github.com/aibtcdev/skills/tree/main/zest-yield-manager) — executes Zest supply/withdraw (plan step uses `--action=<supply|withdraw> --amount=<sats>`)
+- [`bitflow`](https://github.com/aibtcdev/skills/tree/main/bitflow) — executes sBTC↔STX rebalance swap (plan step uses `--token-x/--token-y <contractId> --amount-in <decimal> --slippage-tolerance <0-1> --confirm-high-impact`)
+- **HODLMM full-exit and fresh-deposit are not composed via CLI** — no registry skill currently exposes these primitives. [`hodlmm-move-liquidity`](https://github.com/aibtcdev/skills/tree/main/hodlmm-move-liquidity) only re-positions an existing LP between bins. The router emits `user-confirm` invocations for both HODLMM steps; operators execute manually via Bitflow UI or a direct `dlmm-core-v-1-1 / dlmm-liquidity-router-v-1-1` contract call until a dedicated skill lands.
 - [`hodlmm-bin-optimizer`](https://github.com/BitflowFinance/bff-skills/pull/507) — reads volatility upstream; router reads realized APR downstream
 - [`hodlmm-il-monitor`](https://github.com/aibtcdev/skills/pull/275) — signals when IL deterioration warrants re-routing before the APR gap widens
 
