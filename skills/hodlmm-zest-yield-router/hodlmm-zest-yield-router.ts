@@ -258,7 +258,9 @@ function decide(
   snapshot: RateSnapshot,
   knobs: DecisionKnobs,
 ): DecisionRecord {
-  const hodlmmApr = snapshot.hodlmm_apr24h_pct || snapshot.hodlmm_apr_pct;
+  // Use `??` not `||` so a legitimately-zero apr24h (new pool, no recent volume)
+  // isn't silently swapped for the lifetime apr.
+  const hodlmmApr = snapshot.hodlmm_apr24h_pct ?? snapshot.hodlmm_apr_pct;
   const zestApy = snapshot.zest_supply_apy_pct;
   const gap = hodlmmApr - zestApy; // positive = HODLMM winning
 
@@ -269,9 +271,11 @@ function decide(
   const dwellOk =
     hoursSinceSwitch === null || hoursSinceSwitch >= knobs.min_dwell_hours;
 
-  // Amortize round-trip cost over expected dwell
+  // Amortize round-trip cost over expected dwell.
+  // Example: 0.5% round-trip cost / (7 / 365) = 26.1% annualized drag,
+  // directly comparable against the APR gap between protocols.
   const amortizedCostPct =
-    knobs.round_trip_cost_pct / (knobs.expected_dwell_days / 365); // annualized cost impact
+    knobs.round_trip_cost_pct / (knobs.expected_dwell_days / 365);
   const threshold =
     poolState.current_mode === "zest"
       ? knobs.enter_hodlmm_gap_pct + amortizedCostPct // HODLMM must beat Zest + cost
@@ -339,12 +343,13 @@ function buildPlan(
         order: 1,
         action: "hodlmm-exit",
         description:
-          "Withdraw from HODLMM LP position. Use hodlmm-move-liquidity with a zero-deposit or dedicated exit primitive once available. Until then, withdraw directly via dlmm-core-v-1-1 contract or the Bitflow web UI.",
+          "Fully withdraw from the HODLMM LP position. No skill in the registry currently exposes a full-exit primitive — hodlmm-move-liquidity only re-centers between bins. Exit manually via Bitflow web UI, a direct `dlmm-core-v-1-1::withdraw-relative-liquidity-same-multi` contract call with 100% shares, or a dedicated exit skill once one is merged. Only proceed to step 2 once all LP shares are unstaked and the STX + sBTC balances are back in the wallet.",
         invocation: {
-          type: "cli",
-          skill: "hodlmm-move-liquidity",
-          command: "run",
-          args: ["--pool", poolId, "--mode", "exit", "--confirm"],
+          type: "user-confirm",
+          prompt:
+            "Confirm HODLMM LP position for pool " +
+            poolId +
+            " is fully withdrawn (no DLP shares remaining, STX + sBTC balances returned to wallet). Orchestrator must not execute subsequent steps until this is true.",
         },
       },
       {

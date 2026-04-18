@@ -10,7 +10,7 @@
 ## Guardrails
 - **Never execute plan steps without verifying balances first.** The router's plan is a template; `<stx-from-exit>`, `<sbtc-balance>`, `<50pct-of-sbtc>` are placeholders the orchestrator must resolve from wallet state at execution time.
 - **Confirm dwell_ok before acting.** If `dwell_ok: false` and the plan still shows steps (shouldn't happen in v1, but in case of downstream bugs), refuse to execute — the router thinks enough time has passed but safety says otherwise.
-- **Respect cost_model.net_benefit_pct.** If positive but tiny (<1%), consider whether the overhead of the orchestration + monitoring effort is worth it. Negative net benefit = the router already rejected the switch; don't override.
+- **Respect cost_model.net_benefit_pct, and know what it excludes.** `net_benefit_pct = |gap| - amortized_round_trip_cost_pct`. It does NOT subtract the entry-gap threshold (`enter_zest_gap` / `enter_hodlmm_gap`), so a positive value can still be "barely above the trigger" — e.g. gap 30.24% vs threshold 28.07% = only 2.17% of true margin above the switch line, even if net_benefit_pct reads 4.17%. If you need margin-above-threshold, compute `|gap| - threshold_pct` directly from the decision payload. Negative net_benefit = the router already rejected the switch; don't override.
 - **Never modify `last_switched_at` by editing state directly** — use `set-mode` so dwell-time logic is consistent.
 - **Never expose the state file** — it's operational detail, not an API contract.
 
