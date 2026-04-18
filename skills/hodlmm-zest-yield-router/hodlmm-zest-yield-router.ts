@@ -25,7 +25,7 @@
  */
 
 import { Command } from "commander";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, renameSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import {
@@ -37,13 +37,12 @@ import { STACKS_MAINNET } from "@stacks/network";
 
 // ─── Config ──────────────────────────────────────────────────────────────
 const HODLMM_APP_API = "https://bff.bitflowapis.finance/api/app/v1";
-const HODLMM_QUOTES_API = "https://bff.bitflowapis.finance/api/quotes/v1";
-const HIRO_API = "https://api.hiro.so";
 
 // Zest mainnet — mirrors zest-yield-manager (@secret-mars)
 const ZEST_POOL_RESERVE = "SP2VCQJGH7PHP2DJK7Z0V48AGBHQAW3R3ZW1QF4N.pool-0-reserve-v2-0";
-const ZEST_POOL_BORROW = "SP2VCQJGH7PHP2DJK7Z0V48AGBHQAW3R3ZW1QF4N.pool-borrow-v2-3";
 const SBTC_TOKEN = "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token";
+// STX token contract ID used by bitflow swap (human-readable-alias-insensitive).
+const STX_TOKEN = "SM1793C4R5PZ4NS4VQ4WMP7SKKYVH8JZEWSZ9HCCR.token-stx-v-1-2";
 
 const STATE_PATH =
   process.env.HODLMM_ZEST_ROUTER_STATE ||
@@ -165,7 +164,13 @@ function loadState(): RouterState {
 }
 
 function saveState(state: RouterState): void {
-  writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+  // Atomic write: tmp → rename. Prevents a torn JSON if two `decide` calls
+  // overlap (cron + manual, or `run`'s own scan→decide→plan chain on SIGTERM).
+  // A torn file is silently swallowed by loadState's catch block, which would
+  // erase current_mode + history — unacceptable for dwell-time correctness.
+  const tmp = `${STATE_PATH}.tmp`;
+  writeFileSync(tmp, JSON.stringify(state, null, 2));
+  renameSync(tmp, STATE_PATH);
 }
 
 function ensurePoolState(state: RouterState, poolId: string): PoolState {
@@ -224,18 +229,44 @@ async function fetchZestSupplyApy(): Promise<{
     functionArgs: [contractPrincipalCV(sbtcAddr, sbtcName)],
     senderAddress: address,
   });
+  // cvToJSON shapes: `(ok (tuple ...))` → { success: true, value: { value: tuple } }
+  //                  `(err ...)`         → { success: false, value: ... }
+  //                  bare `(tuple ...)`  → { value: tuple } (no success key)
+  // Walk to the tuple body robustly and fail loudly if the rate field is missing.
   const json = cvToJSON(result) as {
     success?: boolean;
-    value?: { value?: Record<string, { value?: string }> } | Record<string, { value?: string }>;
+    value?: unknown;
   };
-  if (!json?.success) {
-    throw new Error(`Zest reserve-state call failed: ${JSON.stringify(json)}`);
+  if (json?.success === false) {
+    throw new Error(`Zest reserve-state returned (err ...): ${JSON.stringify(json)}`);
   }
-  const outer = json.value as { value?: Record<string, { value?: string }> };
-  const v = (outer.value ?? outer) as Record<string, { value?: string }>;
-  const rateRaw = String(v["current-liquidity-rate"]?.value ?? "0");
-  const supplyApr = Number(BigInt(rateRaw)) / ZEST_RATE_SCALE; // APR as decimal
-  const borrowRaw = String(v["current-variable-borrow-rate"]?.value ?? "0");
+  // Unwrap one or two levels until we find an object containing `current-liquidity-rate`.
+  let body = json?.value as Record<string, { value?: string }> | undefined;
+  const hasRate = (x: unknown): boolean =>
+    typeof x === "object" && x !== null && "current-liquidity-rate" in (x as object);
+  if (!hasRate(body)) {
+    const inner = (body as { value?: unknown } | undefined)?.value;
+    if (hasRate(inner)) body = inner as Record<string, { value?: string }>;
+  }
+  if (!hasRate(body)) {
+    throw new Error(
+      `Zest reserve-state parse: no current-liquidity-rate found in response body: ${JSON.stringify(json).slice(0, 500)}`,
+    );
+  }
+  const v = body as Record<string, { value?: string }>;
+  let rateRaw: string;
+  let borrowRaw: string;
+  try {
+    rateRaw = String(v["current-liquidity-rate"]?.value ?? "0");
+    borrowRaw = String(v["current-variable-borrow-rate"]?.value ?? "0");
+    // Validate they parse as BigInt; empty/malformed strings throw here rather
+    // than produce silent NaN downstream.
+    void BigInt(rateRaw);
+    void BigInt(borrowRaw);
+  } catch (e) {
+    throw new Error(`Zest reserve-state numeric parse failed: ${(e as Error).message}`);
+  }
+  const supplyApr = Number(BigInt(rateRaw)) / ZEST_RATE_SCALE;
   const borrowApr = Number(BigInt(borrowRaw)) / ZEST_RATE_SCALE;
   return {
     supply_apy_pct: Number((supplyApr * 100).toFixed(4)),
@@ -343,7 +374,7 @@ function buildPlan(
         order: 1,
         action: "hodlmm-exit",
         description:
-          "Fully withdraw from the HODLMM LP position. No skill in the registry currently exposes a full-exit primitive — hodlmm-move-liquidity only re-centers between bins. Exit manually via Bitflow web UI, a direct `dlmm-core-v-1-1::withdraw-relative-liquidity-same-multi` contract call with 100% shares, or a dedicated exit skill once one is merged. Only proceed to step 2 once all LP shares are unstaked and the STX + sBTC balances are back in the wallet.",
+          "Fully withdraw from the HODLMM LP position. No skill in the registry currently exposes a full-exit primitive — hodlmm-move-liquidity only re-centers existing bins. Exit manually via the Bitflow web UI or a direct `dlmm-core-v-1-1::withdraw-relative-liquidity-same-multi` contract call with 100% shares. Do not proceed to step 2 until all LP shares are unstaked and STX + sBTC are back in the wallet.",
         invocation: {
           type: "user-confirm",
           prompt:
@@ -354,35 +385,36 @@ function buildPlan(
       },
       {
         order: 2,
-        action: "swap-to-sbtc",
+        action: "swap-stx-to-sbtc",
         description:
-          "Swap any STX received from the HODLMM withdrawal into sBTC via Bitflow SDK so the Zest supply is in a single asset.",
+          "Swap the STX received from the HODLMM withdrawal into sBTC via the bitflow skill so the Zest supply is in a single asset. Orchestrator must substitute `<stx-balance-decimal>` with the post-exit STX balance in human-readable decimal (e.g. `21.0` for 21 STX); bitflow `--amount-in` is decimal-encoded, not sats.",
         invocation: {
           type: "cli",
           skill: "bitflow",
           command: "swap",
           args: [
-            "--from",
-            "STX",
-            "--to",
-            "sBTC",
-            "--amount",
-            "<stx-from-exit>",
-            "--slippage",
-            "3",
-            "--confirm",
+            "--token-x",
+            STX_TOKEN,
+            "--token-y",
+            SBTC_TOKEN,
+            "--amount-in",
+            "<stx-balance-decimal>",
+            "--slippage-tolerance",
+            "0.03",
+            "--confirm-high-impact",
           ],
         },
       },
       {
         order: 3,
         action: "zest-supply",
-        description: "Supply the resulting sBTC balance to Zest.",
+        description:
+          "Supply the resulting sBTC balance to Zest. Orchestrator must substitute `<sbtc-balance-sats>` with the post-swap sBTC balance in integer sats (Zest CLI takes raw sats, not decimal).",
         invocation: {
           type: "cli",
           skill: "zest-yield-manager",
           command: "run",
-          args: ["--action", "supply", "--amount-sats", "<sbtc-balance>"],
+          args: ["--action=supply", "--amount=<sbtc-balance-sats>"],
         },
       },
     ];
@@ -393,33 +425,33 @@ function buildPlan(
       order: 1,
       action: "zest-withdraw",
       description:
-        "Withdraw the full sBTC supply from Zest back to the wallet.",
+        "Withdraw the full sBTC supply from Zest back to the wallet. Orchestrator must substitute `<supplied-sbtc-sats>` with the concrete supplied balance (Zest has no `max` sentinel); read via `zest-yield-manager run --action=status` first.",
       invocation: {
         type: "cli",
         skill: "zest-yield-manager",
         command: "run",
-        args: ["--action", "withdraw", "--amount-sats", "max"],
+        args: ["--action=withdraw", "--amount=<supplied-sbtc-sats>"],
       },
     },
     {
       order: 2,
-      action: "swap-half-to-stx",
+      action: "swap-half-sbtc-to-stx",
       description:
-        "Swap ~50% of the sBTC to STX so the HODLMM deposit can be placed in the target ratio.",
+        "Swap ~50% of the withdrawn sBTC to STX so the HODLMM deposit is placed at the pool's target ratio. Orchestrator must substitute `<50pct-sbtc-decimal>` with half the sBTC balance expressed in decimal (e.g. `0.00025` for 25k sats, not the raw integer).",
       invocation: {
         type: "cli",
         skill: "bitflow",
         command: "swap",
         args: [
-          "--from",
-          "sBTC",
-          "--to",
-          "STX",
-          "--amount",
-          "<50pct-of-sbtc>",
-          "--slippage",
-          "3",
-          "--confirm",
+          "--token-x",
+          SBTC_TOKEN,
+          "--token-y",
+          STX_TOKEN,
+          "--amount-in",
+          "<50pct-sbtc-decimal>",
+          "--slippage-tolerance",
+          "0.03",
+          "--confirm-high-impact",
         ],
       },
     },
@@ -427,19 +459,15 @@ function buildPlan(
       order: 3,
       action: "hodlmm-deposit",
       description:
-        "Deposit the rebalanced STX + sBTC into the HODLMM pool around the active bin.",
+        "Deposit the rebalanced STX + sBTC into the HODLMM pool. No skill in the registry currently exposes a fresh-deposit primitive — hodlmm-move-liquidity only re-positions an existing LP position. Deposit manually via the Bitflow web UI or a direct `dlmm-liquidity-router-v-1-1::add-relative-liquidity-multi` contract call. Only mark the switch complete once DLP shares are confirmed at the target bin-radius.",
       invocation: {
-        type: "cli",
-        skill: "hodlmm-move-liquidity",
-        command: "run",
-        args: [
-          "--pool",
-          poolId,
-          "--center-on-active",
-          "--wallet",
-          stxAddress,
-          "--confirm",
-        ],
+        type: "user-confirm",
+        prompt:
+          "Confirm HODLMM LP position for pool " +
+          poolId +
+          " has been freshly deposited (STX + sBTC ~50/50 around the active bin, DLP shares visible on-chain for wallet " +
+          stxAddress +
+          "). Orchestrator must not call `set-mode --mode hodlmm` until this is true.",
       },
     },
   ];
@@ -584,10 +612,12 @@ async function cmdDecide(poolId: string, knobs: DecisionKnobs): Promise<void> {
     });
     return;
   }
-  // Reuse last scan if fresh (<15 min); otherwise re-scan
-  const scanAge = Date.now() - new Date(poolState.last_scan.ts).getTime();
-  if (scanAge > 15 * 60 * 1000) {
-    log(`last scan is ${Math.round(scanAge / 60000)} min old — re-scanning`);
+  // Reuse last scan if fresh (<15 min); otherwise re-scan. Track whether the
+  // decision ran on stale data so downstream can flag it.
+  const scanAgeMs = Date.now() - new Date(poolState.last_scan.ts).getTime();
+  let scanStale = scanAgeMs > 15 * 60 * 1000;
+  if (scanStale) {
+    log(`last scan is ${Math.round(scanAgeMs / 60000)} min old — re-scanning`);
     try {
       const hodlmmPool = await fetchHodlmmPool(poolId);
       const zest = await fetchZestSupplyApy();
@@ -602,8 +632,10 @@ async function cmdDecide(poolId: string, knobs: DecisionKnobs): Promise<void> {
         hodlmm_tvl_usd: hodlmmPool.tvlUsd ?? null,
         hodlmm_volume_usd_1d: hodlmmPool.volumeUsd1d ?? null,
       };
+      scanStale = false;
     } catch (e) {
       log(`re-scan failed: ${(e as Error).message}, using stale data`);
+      // scanStale stays true
     }
   }
   const decision = decide(poolState, poolState.last_scan, knobs);
@@ -616,7 +648,14 @@ async function cmdDecide(poolId: string, knobs: DecisionKnobs): Promise<void> {
   output({
     status: "success",
     action: "decide",
-    data: { decision, knobs },
+    data: {
+      decision,
+      knobs,
+      scan_age_min: Math.round(
+        (Date.now() - new Date(poolState.last_scan.ts).getTime()) / 60000,
+      ),
+      scan_stale: scanStale,
+    },
     error: null,
   });
 }
