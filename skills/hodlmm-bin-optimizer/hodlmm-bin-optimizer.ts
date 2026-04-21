@@ -292,8 +292,20 @@ function zFor(coverage: number): number {
 function classifyConfidence(
   samples: number,
   lookbackHours: number,
+  binRadius: number,
+  expectedCoveragePct: number,
+  coverageTarget: number,
 ): "high" | "medium" | "low" {
   // `suggest` already early-returns at <5 samples, so this runs only with ≥5.
+  // Downgrade if the recommendation can't actually meet the coverage target:
+  // (a) bin radius was capped at MAX_RADIUS, or
+  // (b) empirical coverage at the deployed center falls >20% short of target.
+  // Both flag that the underlying volatility (or bootstrap-contaminated samples)
+  // exceeds what this configuration can cover — sample density alone is misleading.
+  const coverageShortfall = coverageTarget * 100 - expectedCoveragePct;
+  const capHit = binRadius >= MAX_RADIUS;
+  const coverageTooLow = coverageShortfall > coverageTarget * 100 * 0.2;
+  if (capHit || coverageTooLow) return "low";
   const perHour = samples / Math.max(1, lookbackHours);
   if (samples >= 200 && perHour >= 8) return "high";
   if (samples >= 50 && perHour >= 2) return "medium";
@@ -586,7 +598,13 @@ async function cmdSuggest(
     return;
   }
   const rec = computeRecommendation(current.active_bin, vol, coverage, capitalStx, samples);
-  const confidence = classifyConfidence(vol.samples, lookbackHours);
+  const confidence = classifyConfidence(
+    vol.samples,
+    lookbackHours,
+    rec.bin_radius,
+    rec.expected_coverage_pct,
+    rec.coverage_target,
+  );
   const result: SuggestResult = {
     pool_id: poolId,
     current_active_bin: current.active_bin,
